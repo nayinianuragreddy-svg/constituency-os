@@ -42,11 +42,16 @@ def main() -> None:
         assert "ward and village" in handle_citizen_message(db, chat_id, "9999999999")
         assert "Menu" in handle_citizen_message(db, chat_id, "Ward 12, Rampur")
         issue_type_prompt = handle_citizen_message(db, chat_id, "1")
-        assert "issue type" in issue_type_prompt
-        assert "Streetlight" in issue_type_prompt
-        assert "describe" in handle_citizen_message(db, chat_id, "1")
-        ticket_reply = handle_citizen_message(db, chat_id, "Streetlight near school is not working")
-        assert "Ticket ID:" in ticket_reply
+assert "issue type" in issue_type_prompt
+assert "Streetlight" in issue_type_prompt
+
+describe_prompt = handle_citizen_message(db, chat_id, "Streetlight")
+assert "describe" in describe_prompt
+
+ticket_reply = handle_citizen_message(
+    db, chat_id, "Streetlight near school is not working"
+)
+assert "Ticket ID:" in ticket_reply
 
         citizen = db.query(Citizen).filter(Citizen.telegram_chat_id == chat_id).first()
         assert citizen is not None
