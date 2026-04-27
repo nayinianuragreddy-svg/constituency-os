@@ -68,22 +68,15 @@ class CommunicationAgent(StatelessAgent):
 
         if convo.state == "awaiting_main_menu":
             if clean_text == "1":
-                convo.state = "awaiting_public_issue_department"
+                convo.state = "awaiting_electricity_issue_type"
                 db.commit()
-                return "Public Issue selected. For V1, choose:\n1. Electricity"
+                return (
+                    "Public Issue selected. Please select issue type: "
+                    "Streetlight / Power cut / Transformer fault / Other."
+                )
             if clean_text == "2":
                 return "Track Complaint will be added in V2. Choose 1 for Public Issue."
             return "Invalid choice. Reply 1 for Public Issue or 2 for Track Complaint."
-
-        if convo.state == "awaiting_public_issue_department":
-            if clean_text != "1":
-                return "For V1, only Electricity is supported. Reply with 1."
-            convo.state = "awaiting_electricity_issue_type"
-            db.commit()
-            return (
-                "Choose Electricity issue type:\n"
-                "1. Streetlight\n2. Power cut\n3. Transformer fault\n4. Other"
-            )
 
         if convo.state == "awaiting_electricity_issue_type":
             options = {
