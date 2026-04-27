@@ -71,8 +71,8 @@ class CommunicationAgent(StatelessAgent):
                 convo.state = "awaiting_electricity_issue_type"
                 db.commit()
                 return (
-                    "Public Issue selected. Please select issue type:\n"
-                    "1. Streetlight\n2. Power cut\n3. Transformer fault\n4. Other"
+                    "Public Issue selected. Please select issue type: "
+                    "Streetlight / Power cut / Transformer fault / Other."
                 )
             if clean_text == "2":
                 return "Track Complaint will be added in V2. Choose 1 for Public Issue."
