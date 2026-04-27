@@ -19,3 +19,21 @@ class RuntimeResponse(BaseModel):
     communication: AgentMessage
     dashboard: AgentMessage
     master: AgentMessage
+
+
+class CitizenMessageRequest(BaseModel):
+    telegram_chat_id: str
+    text: str
+
+
+class CitizenMessageResponse(BaseModel):
+    reply: str
+
+
+class OfficerReplyRequest(BaseModel):
+    ticket_id: int
+    reply_text: str
+
+
+class HumanApprovalRequest(BaseModel):
+    approved_by: str = "operator"
