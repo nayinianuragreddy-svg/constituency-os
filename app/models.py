@@ -105,6 +105,19 @@ class AgentAlert(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentAction(Base):
+    __tablename__ = "agent_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    channel: Mapped[str] = mapped_column(String(50), index=True)
+    action_type: Mapped[str] = mapped_column(String(100), index=True)
+    status: Mapped[str] = mapped_column(String(50), default="processing", nullable=False, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    office_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
 class CitizenConversation(Base):
     __tablename__ = "citizen_conversations"
 
