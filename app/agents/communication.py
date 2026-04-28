@@ -6,6 +6,8 @@ from app.models import Citizen, CitizenConversation, Ticket, TicketUpdate
 
 
 class CommunicationAgent(StatelessAgent):
+    GREETING_WORDS = {"hi", "hello", "hey", "namaste", "namaskaram"}
+
     def process(self, message: AgentMessage) -> AgentMessage:
         return AgentMessage(
             sender=self.name,
@@ -23,16 +25,41 @@ class CommunicationAgent(StatelessAgent):
         if convo is None:
             convo = CitizenConversation(
                 telegram_chat_id=telegram_chat_id,
-                state="awaiting_name",
+                state="welcomed",
                 draft={},
             )
             db.add(convo)
             db.commit()
-            return "Welcome. Please share your full name."
+            return (
+                "Namaskaram. This is the digital assistant for the MLA office. "
+                "You can use this chat to raise public issues and track complaints. "
+                "Before we continue, I need to register your details once. "
+                "Please share your full name."
+            )
+
+        command = clean_text.lower()
+        if command == "restart":
+            convo.state = "awaiting_name"
+            convo.citizen_id = None
+            convo.draft = {}
+            db.commit()
+            return "Registration restarted. Please share your full name."
+
+        if command in {"back", "go back", "edit"}:
+            back_reply = self._go_back_one_step(convo)
+            db.commit()
+            return back_reply
 
         draft = dict(convo.draft or {})
 
+        if convo.state == "welcomed":
+            convo.state = "awaiting_name"
+            db.commit()
+            return self.handle_citizen_message(db=db, telegram_chat_id=telegram_chat_id, text=clean_text)
+
         if convo.state == "awaiting_name":
+            if not self._is_valid_name(clean_text):
+                return "Please share your full name, not a greeting. Example: Asha Singh."
             draft["name"] = clean_text
             convo.state = "awaiting_mobile"
             convo.draft = draft
@@ -40,13 +67,17 @@ class CommunicationAgent(StatelessAgent):
             return "Please share your mobile number."
 
         if convo.state == "awaiting_mobile":
-            draft["mobile"] = clean_text
-            convo.state = "awaiting_ward_village"
+            if not self._is_valid_mobile(clean_text):
+                return "Please share a valid 10-digit mobile number."
+            draft["mobile"] = self._digits_only(clean_text)
+            convo.state = "awaiting_ward"
             convo.draft = draft
             db.commit()
-            return "Please share ward and village (example: Ward 12, Rampur)."
+            return "Please share ward and village/locality. Example: Ward 12, Rampur."
 
-        if convo.state == "awaiting_ward_village":
+        if convo.state in {"awaiting_ward", "awaiting_ward_village"}:
+            if not self._is_valid_ward(clean_text):
+                return "Please share your ward and village/locality. Example: Ward 12, Rampur."
             ward, village = self._split_ward_village(clean_text)
             citizen = Citizen(
                 name=draft["name"],
@@ -124,6 +155,59 @@ class CommunicationAgent(StatelessAgent):
         convo.state = "awaiting_main_menu"
         db.commit()
         return "Menu:\n1. Public Issue\n2. Track Complaint"
+
+    @classmethod
+    def _is_valid_name(cls, text: str) -> bool:
+        candidate = text.strip()
+        if not candidate:
+            return False
+        if candidate.lower() in cls.GREETING_WORDS:
+            return False
+        return any(char.isalpha() for char in candidate)
+
+    @staticmethod
+    def _digits_only(text: str) -> str:
+        return "".join(char for char in text if char.isdigit())
+
+    @classmethod
+    def _is_valid_mobile(cls, text: str) -> bool:
+        digits = cls._digits_only(text.strip())
+        return len(digits) == 10
+
+    @staticmethod
+    def _is_valid_ward(text: str) -> bool:
+        candidate = text.strip()
+        if len(candidate) < 3:
+            return False
+        has_alpha = any(char.isalpha() for char in candidate)
+        has_digit = any(char.isdigit() for char in candidate)
+        return (has_alpha and has_digit) or len(candidate) >= 3
+
+    @staticmethod
+    def _go_back_one_step(convo: CitizenConversation) -> str:
+        state_back_map = {
+            "welcomed": ("awaiting_name", "Please share your full name."),
+            "awaiting_name": ("awaiting_name", "Please share your full name."),
+            "awaiting_mobile": ("awaiting_name", "Okay, let's update your name. Please share your full name."),
+            "awaiting_ward": (
+                "awaiting_mobile",
+                "Okay, let's update your mobile number. Please share a valid 10-digit mobile number.",
+            ),
+            "awaiting_ward_village": (
+                "awaiting_mobile",
+                "Okay, let's update your mobile number. Please share a valid 10-digit mobile number.",
+            ),
+            "awaiting_main_menu": (
+                "awaiting_ward",
+                "Okay, let's update your ward and village/locality. Example: Ward 12, Rampur.",
+            ),
+        }
+        next_state, prompt = state_back_map.get(
+            convo.state,
+            ("awaiting_name", "Please share your full name."),
+        )
+        convo.state = next_state
+        return prompt
 
     @staticmethod
     def _split_ward_village(text: str) -> tuple[str, str]:
