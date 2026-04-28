@@ -1,3 +1,6 @@
+import re
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agents.base import StatelessAgent
@@ -7,6 +10,8 @@ from app.models import Citizen, CitizenConversation, Ticket, TicketUpdate
 
 class CommunicationAgent(StatelessAgent):
     GREETING_WORDS = {"hi", "hello", "hey", "namaste", "namaskaram"}
+    WELCOME_BACK_MENU = "Welcome back, {name}. What would you like to do today?\n1. Public Issue\n2. Track Complaint"
+    MAIN_MENU = "Menu:\n1. Public Issue\n2. Track Complaint"
 
     def process(self, message: AgentMessage) -> AgentMessage:
         return AgentMessage(
@@ -17,6 +22,7 @@ class CommunicationAgent(StatelessAgent):
 
     def handle_citizen_message(self, db: Session, telegram_chat_id: str, text: str) -> str:
         clean_text = text.strip()
+        citizen = db.query(Citizen).filter(Citizen.telegram_chat_id == telegram_chat_id).first()
         convo = (
             db.query(CitizenConversation)
             .filter(CitizenConversation.telegram_chat_id == telegram_chat_id)
@@ -29,6 +35,11 @@ class CommunicationAgent(StatelessAgent):
                 draft={},
             )
             db.add(convo)
+            if citizen:
+                convo.citizen_id = citizen.id
+                convo.state = "awaiting_main_menu"
+                db.commit()
+                return self.WELCOME_BACK_MENU.format(name=citizen.name)
             db.commit()
             return (
                 "Namaskaram. This is the digital assistant for the MLA office. "
@@ -37,10 +48,22 @@ class CommunicationAgent(StatelessAgent):
                 "Please share your full name."
             )
 
+        if citizen and convo.state in {"welcomed", "awaiting_name", "awaiting_mobile", "awaiting_ward", "awaiting_ward_village"}:
+            convo.citizen_id = citizen.id
+            convo.state = "awaiting_main_menu"
+            convo.draft = {}
+            db.commit()
+            return self.WELCOME_BACK_MENU.format(name=citizen.name)
+
         command = clean_text.lower()
         if command == "restart":
+            if citizen:
+                convo.citizen_id = citizen.id
+                convo.state = "awaiting_main_menu"
+                convo.draft = {}
+                db.commit()
+                return self.WELCOME_BACK_MENU.format(name=citizen.name)
             convo.state = "awaiting_name"
-            convo.citizen_id = None
             convo.draft = {}
             db.commit()
             return "Registration restarted. Please share your full name."
@@ -77,25 +100,43 @@ class CommunicationAgent(StatelessAgent):
 
         if convo.state in {"awaiting_ward", "awaiting_ward_village"}:
             if not self._is_valid_ward(clean_text):
-                return "Please share your ward and village/locality. Example: Ward 12, Rampur."
+                return "Please share both ward number and village/locality. Example: Ward 12, Rampur."
             ward, village = self._split_ward_village(clean_text)
-            citizen = Citizen(
-                name=draft["name"],
-                mobile=draft["mobile"],
-                ward=ward,
-                village=village,
-                location_text=clean_text,
-                telegram_chat_id=telegram_chat_id,
-            )
-            db.add(citizen)
-            db.flush()
+            citizen = db.query(Citizen).filter(Citizen.telegram_chat_id == telegram_chat_id).first()
+            if citizen is None:
+                citizen = Citizen(
+                    name=draft["name"],
+                    mobile=draft["mobile"],
+                    ward=ward,
+                    village=village,
+                    location_text=clean_text,
+                    telegram_chat_id=telegram_chat_id,
+                )
+                db.add(citizen)
+                try:
+                    db.flush()
+                except IntegrityError:
+                    db.rollback()
+                    citizen = db.query(Citizen).filter(Citizen.telegram_chat_id == telegram_chat_id).first()
+                    convo = (
+                        db.query(CitizenConversation)
+                        .filter(CitizenConversation.telegram_chat_id == telegram_chat_id)
+                        .first()
+                    )
+                    if citizen is not None and convo is not None:
+                        convo.citizen_id = citizen.id
+                        convo.state = "awaiting_main_menu"
+                        convo.draft = {}
+                        db.commit()
+                        return self.WELCOME_BACK_MENU.format(name=citizen.name)
+                    raise
             convo.citizen_id = citizen.id
             draft["ward"] = ward
             draft["village"] = village
             convo.draft = draft
             convo.state = "awaiting_main_menu"
             db.commit()
-            return "Menu:\n1. Public Issue\n2. Track Complaint"
+            return self.MAIN_MENU
 
         if convo.state == "awaiting_main_menu":
             if clean_text == "1":
@@ -154,7 +195,7 @@ class CommunicationAgent(StatelessAgent):
 
         convo.state = "awaiting_main_menu"
         db.commit()
-        return "Menu:\n1. Public Issue\n2. Track Complaint"
+        return self.MAIN_MENU
 
     @classmethod
     def _is_valid_name(cls, text: str) -> bool:
@@ -179,9 +220,21 @@ class CommunicationAgent(StatelessAgent):
         candidate = text.strip()
         if len(candidate) < 3:
             return False
-        has_alpha = any(char.isalpha() for char in candidate)
-        has_digit = any(char.isdigit() for char in candidate)
-        return (has_alpha and has_digit) or len(candidate) >= 3
+        parsed = CommunicationAgent._parse_ward_village(candidate)
+        if parsed is None:
+            return False
+        ward_number, locality = parsed
+        if not ward_number or not locality:
+            return False
+        words = re.findall(r"[A-Za-z]+", locality.lower())
+        if not words:
+            return False
+        if max(len(word) for word in words) < 3:
+            return False
+        unique_words = {word for word in words}
+        if len(unique_words) == 1 and len(words) > 1:
+            return False
+        return True
 
     @staticmethod
     def _go_back_one_step(convo: CitizenConversation) -> str:
@@ -211,7 +264,20 @@ class CommunicationAgent(StatelessAgent):
 
     @staticmethod
     def _split_ward_village(text: str) -> tuple[str, str]:
-        parts = [chunk.strip() for chunk in text.split(",", maxsplit=1)]
-        ward = parts[0] if parts else text
-        village = parts[1] if len(parts) > 1 else ""
-        return ward, village
+        parsed = CommunicationAgent._parse_ward_village(text.strip())
+        if parsed is None:
+            return text.strip(), ""
+        ward_number, village = parsed
+        return f"Ward {ward_number}", village
+
+    @staticmethod
+    def _parse_ward_village(text: str) -> tuple[str, str] | None:
+        candidate = re.sub(r"\s+", " ", text.strip())
+        match = re.match(
+            r"^(?:ward\s+)?(?P<ward>\d{1,3})(?:\s*,?\s+)(?P<locality>[A-Za-z][A-Za-z\s-]*)$",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group("ward"), match.group("locality").strip()

@@ -71,11 +71,18 @@ def process_incoming_update(db: Session, update: dict[str, Any], sender: Telegra
         db.flush()
     except IntegrityError:
         db.rollback()
-        return {
-            "status": "duplicate_skipped",
-            "idempotency_key": idempotency_key,
-            "update_id": update_id,
-        }
+        action = db.query(AgentAction).filter(AgentAction.idempotency_key == idempotency_key).first()
+        if action is None:
+            raise
+        if action.status == "processed":
+            return {
+                "status": "duplicate_skipped",
+                "idempotency_key": idempotency_key,
+                "update_id": update_id,
+            }
+        action.status = "processing"
+        action.payload = update
+        db.flush()
 
     message = update.get("message") or {}
     text = message.get("text")
@@ -92,8 +99,14 @@ def process_incoming_update(db: Session, update: dict[str, Any], sender: Telegra
             "idempotency_key": idempotency_key,
         }
 
-    reply = handle_citizen_message(db, telegram_chat_id=str(chat_id), text=text)
-    send_result = sender.send_message(chat_id=str(chat_id), text=reply)
+    try:
+        reply = handle_citizen_message(db, telegram_chat_id=str(chat_id), text=text)
+        send_result = sender.send_message(chat_id=str(chat_id), text=reply)
+    except Exception as exc:
+        action.status = "error"
+        action.response_payload = {"error": str(exc)}
+        db.commit()
+        raise
 
     action.status = "processed"
     action.response_payload = {
