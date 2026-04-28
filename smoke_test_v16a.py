@@ -42,25 +42,52 @@ def main() -> None:
         assert "ward and village/locality" in valid_mobile
 
         invalid_ward = handle_citizen_message(db, chat_id, "12")
-        assert "ward and village/locality" in invalid_ward
+        assert "both ward number and village/locality" in invalid_ward
+
+        weak_ward = handle_citizen_message(db, chat_id, "Ward ward")
+        assert "both ward number and village/locality" in weak_ward
 
         valid_ward = handle_citizen_message(db, chat_id, "Ward 12, Rampur")
         assert "Menu:" in valid_ward
 
         restart_reply = handle_citizen_message(db, chat_id, "restart")
-        assert "Registration restarted" in restart_reply
+        assert "Welcome back, Asha Singh" in restart_reply
+        convo = (
+            db.query(CitizenConversation)
+            .filter(CitizenConversation.telegram_chat_id == chat_id)
+            .first()
+        )
+        assert convo is not None
+        assert convo.state == "awaiting_main_menu"
 
         post_restart_invalid = handle_citizen_message(db, chat_id, "hello")
-        assert "full name, not a greeting" in post_restart_invalid
+        assert "Invalid choice" in post_restart_invalid
 
         post_restart_name = handle_citizen_message(db, chat_id, "Rekha Devi")
-        assert "mobile number" in post_restart_name
+        assert "Invalid choice" in post_restart_name
+
+        assert db.query(Citizen).filter(Citizen.telegram_chat_id == chat_id).count() == 1
+
+        convo.state = "awaiting_ward"
+        db.commit()
+        duplicate_safe = handle_citizen_message(db, chat_id, "Ward 12, Rampur")
+        assert "Welcome back, Asha Singh" in duplicate_safe
+        assert db.query(Citizen).filter(Citizen.telegram_chat_id == chat_id).count() == 1
 
         flow_chat_id = "telegram:citizen:v16a-flow"
         assert "digital assistant" in handle_citizen_message(db, flow_chat_id, "Hi")
         assert "mobile" in handle_citizen_message(db, flow_chat_id, "Ravi Kumar")
         assert "ward and village/locality" in handle_citizen_message(db, flow_chat_id, "9999988888")
         assert "Menu" in handle_citizen_message(db, flow_chat_id, "Ward 9, Lakshmipur")
+        flow_convo = (
+            db.query(CitizenConversation)
+            .filter(CitizenConversation.telegram_chat_id == flow_chat_id)
+            .first()
+        )
+        assert flow_convo is not None
+        flow_convo.state = "awaiting_name"
+        db.commit()
+        assert "Welcome back, Ravi Kumar" in handle_citizen_message(db, flow_chat_id, "Hi again")
 
         issue_type_prompt = handle_citizen_message(db, flow_chat_id, "1")
         assert "issue type" in issue_type_prompt
