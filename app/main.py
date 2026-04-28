@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 
 from app.contracts import (
@@ -10,7 +12,9 @@ from app.contracts import (
 )
 from app.db import SessionLocal, init_db
 from app.runtime import RuntimeOrchestrator
+from app.telegram_adapter import TelegramApiClient, process_incoming_update
 from app.tools import ToolGateway
+from app.config import TELEGRAM_BOT_TOKEN
 from app.v1 import (
     approve_human_approval,
     consume_master_alerts,
@@ -94,5 +98,21 @@ def master_consume() -> dict[str, list[dict]]:
     try:
         alerts = consume_master_alerts(db)
         return {"alerts": alerts}
+    finally:
+        db.close()
+
+
+@app.post("/v1/telegram/webhook")
+def telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="TELEGRAM_BOT_TOKEN is missing. Set it before using Telegram webhook mode.",
+        )
+
+    db = SessionLocal()
+    try:
+        sender = TelegramApiClient(bot_token=TELEGRAM_BOT_TOKEN)
+        return process_incoming_update(db=db, update=update, sender=sender)
     finally:
         db.close()
