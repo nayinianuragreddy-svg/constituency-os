@@ -1,0 +1,27 @@
+# Environments
+.env
+.env.*
+.venv/
+.venv311/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local databases
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Misc
+constituency-os/
