@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 
+from app.admin_view import router as admin_router
 from app.contracts import (
     CitizenMessageRequest,
     CitizenMessageResponse,
@@ -24,6 +25,8 @@ from app.v1 import (
 )
 
 app = FastAPI(title="Constituency OS V1", version="0.2.0")
+app.include_router(admin_router)
+
 runtime = RuntimeOrchestrator()
 tools = ToolGateway()
 
