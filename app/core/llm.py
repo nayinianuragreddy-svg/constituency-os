@@ -25,6 +25,33 @@ _daily_cost: dict[str, float] = {}
 _limits_lock = threading.Lock()
 
 
+def _default_openai_provider(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    tools: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Default OpenAI provider used when no provider_call is passed.
+    Uses OPENAI_API_KEY from environment. Returns dict with 'text' key."""
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+    }
+    if "Return JSON only" in system_prompt:
+        kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**kwargs)
+    return {"text": response.choices[0].message.content or ""}
+
+
 def _log(action_type: str, message: str, metadata: dict[str, Any] | None = None) -> None:
     agent_name = (metadata or {}).get("agent_name", "llm_spine")
     print(
@@ -118,7 +145,7 @@ def llm_call(
         return LLMResult(success=True, text="", fallback_used=True)
 
     if provider_call is None:
-        return LLMResult(success=False, text="", fallback_used=True, error="provider_call is required")
+        provider_call = _default_openai_provider
 
     timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "15"))
     sp = system_prompt
