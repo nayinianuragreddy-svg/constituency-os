@@ -103,3 +103,17 @@ python -m compileall app smoke_test_v0.py smoke_test_v1.py smoke_test_v15.py
 1. Telegram update processing through shared adapter logic.
 2. Idempotent duplicate update skip using `telegram:update:{update_id}`.
 3. Citizen reply generation routed through Telegram sender abstraction.
+
+
+## V1.8 Intake Template
+- Deterministic intake body for ~99 state flow and 14 category codes.
+- Run migrations: `python scripts/run_v18_migrations.py`
+- Seed baseline data: `python scripts/seed_v18.py`
+- Run smoke tests:
+  - `python smoke_test_v1.py`
+  - `python smoke_test_v15.py`
+  - `python smoke_test_v16a.py`
+  - `python smoke_test_llm_spine.py`
+  - `python smoke_test_v2_communication_brain.py`
+  - `python smoke_test_v18_full_intake.py`
+- V1.8 implements deterministic body; V1.9 will update LLM prompts for extraction.

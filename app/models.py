@@ -122,11 +122,30 @@ class CitizenConversation(Base):
     __tablename__ = "citizen_conversations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    telegram_chat_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
-    state: Mapped[str] = mapped_column(String(100), default="awaiting_name", nullable=False)
-    draft: Mapped[dict] = mapped_column(JSON, default=dict)
-    citizen_id: Mapped[int | None] = mapped_column(ForeignKey("citizens.id"), nullable=True)
     office_id: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    updated_at: Mapped[str] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
+    citizen_id: Mapped[int | None] = mapped_column(ForeignKey("citizens.id"), nullable=True)
+    telegram_chat_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    current_state: Mapped[str] = mapped_column(String(100), default="s0_identity_check", nullable=False)
+    return_to_state: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    draft_ticket_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    draft_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_inbound_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_state_change_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    invalid_attempts_in_state: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    @property
+    def state(self):
+        return self.current_state
+
+    @state.setter
+    def state(self, value):
+        self.current_state = value
+
+    @property
+    def draft(self):
+        return self.draft_payload
+
+    @draft.setter
+    def draft(self, value):
+        self.draft_payload = value

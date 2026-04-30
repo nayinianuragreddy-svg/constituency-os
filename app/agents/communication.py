@@ -41,13 +41,13 @@ class CommunicationAgent(StatelessAgent):
         if convo is None:
             convo = CitizenConversation(
                 telegram_chat_id=telegram_chat_id,
-                state="welcomed",
-                draft={},
+                current_state="welcomed",
+                draft_payload={},
             )
             db.add(convo)
             if citizen:
                 convo.citizen_id = citizen.id
-                convo.state = "awaiting_main_menu"
+                convo.current_state = "awaiting_main_menu"
                 db.commit()
                 return self.WELCOME_BACK_MENU.format(name=citizen.name)
             db.commit()
@@ -60,10 +60,10 @@ class CommunicationAgent(StatelessAgent):
 
         intent_data = self._route_intent(db=db, convo=convo, citizen=citizen, telegram_chat_id=telegram_chat_id, text=clean_text)
 
-        if citizen and convo.state in {"welcomed", "awaiting_name", "awaiting_mobile", "awaiting_ward", "awaiting_ward_village"}:
+        if citizen and convo.current_state in {"welcomed", "awaiting_name", "awaiting_mobile", "awaiting_ward", "awaiting_ward_village"}:
             convo.citizen_id = citizen.id
-            convo.state = "awaiting_main_menu"
-            convo.draft = {}
+            convo.current_state = "awaiting_main_menu"
+            convo.draft_payload = {}
             db.commit()
             return self.WELCOME_BACK_MENU.format(name=citizen.name)
 
@@ -71,12 +71,12 @@ class CommunicationAgent(StatelessAgent):
         if command == "restart":
             if citizen:
                 convo.citizen_id = citizen.id
-                convo.state = "awaiting_main_menu"
-                convo.draft = {}
+                convo.current_state = "awaiting_main_menu"
+                convo.draft_payload = {}
                 db.commit()
                 return self.WELCOME_BACK_MENU.format(name=citizen.name)
-            convo.state = "awaiting_name"
-            convo.draft = {}
+            convo.current_state = "awaiting_name"
+            convo.draft_payload = {}
             db.commit()
             return "Registration restarted. Please share your full name."
 
@@ -85,7 +85,7 @@ class CommunicationAgent(StatelessAgent):
             db.commit()
             return back_reply
 
-        draft = dict(convo.draft or {})
+        draft = dict(convo.draft_payload or {})
         state_intent_override = None
 
         if intent_data and intent_data.get("intent") == "fix_earlier":
@@ -104,39 +104,39 @@ class CommunicationAgent(StatelessAgent):
             return self._draft_reply(db, telegram_chat_id, convo, "status_reply", reply, clean_text, citizen)
         elif intent_data and intent_data.get("intent") == "abandon":
             if citizen:
-                convo.state = "awaiting_main_menu"
-                convo.draft = {}
+                convo.current_state = "awaiting_main_menu"
+                convo.draft_payload = {}
                 db.commit()
                 return self._draft_reply(db, telegram_chat_id, convo, "show_main_menu", self.WELCOME_BACK_MENU.format(name=citizen.name), clean_text, citizen)
             reply = "Would you like to restart registration? Reply restart."
             return self._draft_reply(db, telegram_chat_id, convo, "ask_clarifying_question", reply, clean_text, citizen)
 
-        if convo.state == "welcomed":
-            convo.state = "awaiting_name"
+        if convo.current_state == "welcomed":
+            convo.current_state = "awaiting_name"
             db.commit()
             return self.handle_citizen_message(db=db, telegram_chat_id=telegram_chat_id, text=clean_text)
 
-        if convo.state == "awaiting_name":
+        if convo.current_state == "awaiting_name":
             clean_text = self._candidate_or_text(intent_data, clean_text, "name")
             if not self._is_valid_name(clean_text):
                 return self._draft_reply(db, telegram_chat_id, convo, "invalid_name", "Please share your full name, not a greeting. Example: Asha Singh.", clean_text, citizen)
             draft["name"] = clean_text
-            convo.state = "awaiting_mobile"
-            convo.draft = draft
+            convo.current_state = "awaiting_mobile"
+            convo.draft_payload = draft
             db.commit()
             return self._draft_reply(db, telegram_chat_id, convo, "ask_mobile", "Please share your mobile number.", clean_text, citizen)
 
-        if convo.state == "awaiting_mobile":
+        if convo.current_state == "awaiting_mobile":
             clean_text = self._candidate_or_text(intent_data, clean_text, "mobile")
             if not self._is_valid_mobile(clean_text):
                 return self._draft_reply(db, telegram_chat_id, convo, "invalid_mobile", "Please share a valid 10-digit mobile number.", clean_text, citizen)
             draft["mobile"] = self._digits_only(clean_text)
-            convo.state = "awaiting_ward"
-            convo.draft = draft
+            convo.current_state = "awaiting_ward"
+            convo.draft_payload = draft
             db.commit()
             return self._draft_reply(db, telegram_chat_id, convo, "ask_ward", "Please share ward and village/locality. Example: Ward 12, Rampur.", clean_text, citizen)
 
-        if convo.state in {"awaiting_ward", "awaiting_ward_village"}:
+        if convo.current_state in {"awaiting_ward", "awaiting_ward_village"}:
             clean_text = self._candidate_or_text(intent_data, clean_text, "ward")
             if not self._is_valid_ward(clean_text):
                 return self._draft_reply(db, telegram_chat_id, convo, "invalid_ward", "Please share both ward number and village/locality. Example: Ward 12, Rampur.", clean_text, citizen)
@@ -164,22 +164,22 @@ class CommunicationAgent(StatelessAgent):
                     )
                     if citizen is not None and convo is not None:
                         convo.citizen_id = citizen.id
-                        convo.state = "awaiting_main_menu"
-                        convo.draft = {}
+                        convo.current_state = "awaiting_main_menu"
+                        convo.draft_payload = {}
                         db.commit()
                         return self.WELCOME_BACK_MENU.format(name=citizen.name)
                     raise
             convo.citizen_id = citizen.id
             draft["ward"] = ward
             draft["village"] = village
-            convo.draft = draft
-            convo.state = "awaiting_main_menu"
+            convo.draft_payload = draft
+            convo.current_state = "awaiting_main_menu"
             db.commit()
             return self._draft_reply(db, telegram_chat_id, convo, "show_main_menu", self.MAIN_MENU, clean_text, citizen)
 
-        if convo.state == "awaiting_main_menu":
+        if convo.current_state == "awaiting_main_menu":
             if clean_text == "1":
-                convo.state = "awaiting_electricity_issue_type"
+                convo.current_state = "awaiting_electricity_issue_type"
                 db.commit()
                 return (
                     "Public Issue selected. Please select issue type: "
@@ -189,7 +189,7 @@ class CommunicationAgent(StatelessAgent):
                 return "Track Complaint will be added in V2. Choose 1 for Public Issue."
             return "Invalid choice. Reply 1 for Public Issue or 2 for Track Complaint."
 
-        if convo.state == "awaiting_electricity_issue_type":
+        if convo.current_state == "awaiting_electricity_issue_type":
             options = {
                 "1": "Streetlight",
                 "2": "Power cut",
@@ -202,12 +202,12 @@ class CommunicationAgent(StatelessAgent):
             draft["category"] = "Public Issue"
             draft["department"] = "electricity"
             draft["subcategory"] = subcategory
-            convo.draft = draft
-            convo.state = "awaiting_description"
+            convo.draft_payload = draft
+            convo.current_state = "awaiting_description"
             db.commit()
             return "Please describe the issue."
 
-        if convo.state == "awaiting_description":
+        if convo.current_state == "awaiting_description":
             ticket = Ticket(
                 citizen_id=convo.citizen_id,
                 category=draft["category"],
@@ -227,25 +227,25 @@ class CommunicationAgent(StatelessAgent):
                     source="communication_agent",
                 )
             )
-            convo.state = "awaiting_main_menu"
-            convo.draft = {}
+            convo.current_state = "awaiting_main_menu"
+            convo.draft_payload = {}
             db.commit()
             return self._draft_reply(db, telegram_chat_id, convo, "ticket_created", f"Complaint registered. Ticket ID: {ticket.id}", clean_text, citizen, {"ticket_id": ticket.id})
 
-        convo.state = "awaiting_main_menu"
+        convo.current_state = "awaiting_main_menu"
         db.commit()
         return self.MAIN_MENU
 
     def _route_intent(self, db: Session, convo: CitizenConversation, citizen: Citizen | None, telegram_chat_id: str, text: str) -> dict[str, Any] | None:
-        res = llm_call(user_prompt=text, system_prompt=load_prompt("communication_intent_router"), response_format="json", json_schema=self.INTENT_JSON_SCHEMA, metadata={"agent_name": "communication", "purpose": "intent_router", "office_id": 1, "citizen_id": citizen.id if citizen else None, "ticket_id": None, "idempotency_key": f"comm:intent:{telegram_chat_id}:{convo.id}:{convo.state}"}, provider_call=self.llm_provider_call)
+        res = llm_call(user_prompt=text, system_prompt=load_prompt("communication_intent_router"), response_format="json", json_schema=self.INTENT_JSON_SCHEMA, metadata={"agent_name": "communication", "purpose": "intent_router", "office_id": 1, "citizen_id": citizen.id if citizen else None, "ticket_id": None, "idempotency_key": f"comm:intent:{telegram_chat_id}:{convo.id}:{convo.current_state}"}, provider_call=self.llm_provider_call)
         data = res.parsed_json if res.success and isinstance(res.parsed_json, dict) else None
         if not data or float(data.get("confidence", 0.0)) < 0.7:
             return None
-        self._record_llm_action(db, f"llm:communication:intent:{telegram_chat_id}:{convo.id}:{convo.state}", "intent_router", data)
+        self._record_llm_action(db, f"llm:communication:intent:{telegram_chat_id}:{convo.id}:{convo.current_state}", "intent_router", data)
         return data
 
     def _draft_reply(self, db: Session, telegram_chat_id: str, convo: CitizenConversation, state_intent: str, fallback_text: str, user_message: str, citizen: Citizen | None, extra_data: dict[str, Any] | None = None) -> str:
-        draft = self.draft_reply(state_intent=state_intent, citizen_context={"state": convo.state, "citizen_name": citizen.name if citizen else None, "user_message": user_message}, extra_data=extra_data, db=db, idempotency_key=f"llm:communication:reply:{telegram_chat_id}:{convo.id}:{state_intent}")
+        draft = self.draft_reply(state_intent=state_intent, citizen_context={"state": convo.current_state, "citizen_name": citizen.name if citizen else None, "user_message": user_message}, extra_data=extra_data, db=db, idempotency_key=f"llm:communication:reply:{telegram_chat_id}:{convo.id}:{state_intent}")
         return draft or fallback_text
 
     def draft_reply(self, state_intent: str, citizen_context: dict, extra_data: dict | None = None, db: Session | None = None, idempotency_key: str | None = None) -> str:
@@ -275,14 +275,14 @@ class CommunicationAgent(StatelessAgent):
 
     def _apply_fix_earlier(self, convo: CitizenConversation, fix_field: str | None) -> tuple[str, str | None]:
         allowed_states = {"awaiting_name", "awaiting_mobile", "awaiting_ward", "awaiting_issue_type", "awaiting_description", "awaiting_confirmation", "awaiting_electricity_issue_type"}
-        if convo.state == "awaiting_main_menu":
+        if convo.current_state == "awaiting_main_menu":
             return "ask_clarifying_question", None
-        if convo.state not in allowed_states:
+        if convo.current_state not in allowed_states:
             return "fix_unavailable_ticket_created", "Changes are not available after ticket creation. Please ask staff to update your details."
         mapping = {"name": "awaiting_name", "mobile": "awaiting_mobile", "ward": "awaiting_ward", "issue": "awaiting_description"}
         if fix_field not in mapping:
             return "ask_clarifying_question", "Please tell me what to fix: name, mobile, ward, or issue."
-        convo.state = mapping[fix_field]
+        convo.current_state = mapping[fix_field]
         return "ask_clarifying_question", None
 
     @staticmethod
@@ -350,10 +350,10 @@ class CommunicationAgent(StatelessAgent):
             ),
         }
         next_state, prompt = state_back_map.get(
-            convo.state,
+            convo.current_state,
             ("awaiting_name", "Please share your full name."),
         )
-        convo.state = next_state
+        convo.current_state = next_state
         return prompt
 
     @staticmethod
