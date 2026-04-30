@@ -76,7 +76,7 @@ def llm_call(
     *,
     user_prompt: str,
     system_prompt: str,
-    model: str = "gpt-4o-mini",
+    model: str | None = None,
     temperature: float = 0.2,
     tools: list[dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
@@ -100,6 +100,11 @@ def llm_call(
       "idempotency_key": str | None
     }
     """
+    # Per-agent model override: LLM_MODEL_<AGENT_NAME> > LLM_MODEL > "gpt-4o-mini"
+    if model is None:
+        agent_name = (metadata or {}).get("agent_name", "").upper()
+        model = os.getenv(f"LLM_MODEL_{agent_name}") or os.getenv("LLM_MODEL", "gpt-4o-mini")
+
     if not os.getenv("LLM_ENABLED", "false").lower() == "true":
         return LLMResult(
             success=True,
