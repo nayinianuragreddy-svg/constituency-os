@@ -3,7 +3,7 @@ from app.core.llm import llm_call, load_prompt
 
 _FALLBACKS = {
     "te": "క్షమించండి, మరోసారి చెప్పగలరా?",
-    "hi": "कमा करें, कृपया दोबारा बताएं।",
+    "hi": "क्षमा करें, कृपया दोबारा बताएं।",
     "en": "Sorry, could you please rephrase?",
 }
 

@@ -90,6 +90,19 @@ def main() -> None:
     assert fallback_te == "క్షమించండి, మరోసారి చెప్పగలరా?", f"expected Telugu fallback, got {fallback_te!r}"
     print(f"  Telugu fallback: {fallback_te!r}")
 
+    disambig_mod.llm_call = lambda **kw: original_llm(**{**kw, "provider_call": _provider_bad_json})
+    llm_mod._call_times.clear()
+    llm_mod._daily_cost.clear()
+
+    fallback_hi = draft_disambiguation_reply(
+        current_state="s2_register_dob",
+        last_bot_message="Please share your DOB.",
+        user_message="kuch bhi",
+        preferred_language="hi",
+    )
+    assert fallback_hi == "क्षमा करें, कृपया दोबारा बताएं।", f"expected Hindi fallback, got {fallback_hi!r}"
+    print(f"  Hindi fallback: {fallback_hi!r}")
+
     disambig_mod.llm_call = original_llm
     print("Disambiguator smoke test passed.")
 
