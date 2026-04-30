@@ -10,6 +10,7 @@ from app.config import DATABASE_URL
 from app.db import init_db
 
 MIGRATIONS = [
+    "migrations.v18_000_create_offices",
     "migrations.v18_001_extend_citizens",
     "migrations.v18_002_extend_tickets",
     "migrations.v18_003_extend_officer_mappings",
