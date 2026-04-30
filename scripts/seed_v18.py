@@ -1,6 +1,12 @@
 """Idempotent seed script for V1.8 intake foundation."""
 import os
+import pathlib
+import sys
+
 from sqlalchemy import create_engine, text
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from app.config import DATABASE_URL
 
 CATEGORIES = [
@@ -31,7 +37,6 @@ def seed() -> None:
     engine = create_engine(DATABASE_URL)
     pa_mobile = os.getenv("DEV_OFFICER_MOBILE", "9999999999")
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO offices (id) VALUES (1) ON CONFLICT (id) DO NOTHING"))
         for code, group_, name, emoji, queue, sort_order in CATEGORIES:
             conn.execute(text(
                 """
@@ -89,6 +94,7 @@ def seed() -> None:
                     "mobile": mobile,
                     "queue_name": queue,
                 })
+
 
 if __name__ == "__main__":
     seed()

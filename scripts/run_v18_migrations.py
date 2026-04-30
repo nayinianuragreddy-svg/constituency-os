@@ -1,6 +1,13 @@
+import pathlib
+import sys
 from importlib import import_module
-from sqlalchemy import create_engine
+
+from sqlalchemy import create_engine, inspect
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from app.config import DATABASE_URL
+from app.db import init_db
 
 MIGRATIONS = [
     "migrations.v18_001_extend_citizens",
@@ -16,6 +23,10 @@ MIGRATIONS = [
 ]
 
 engine = create_engine(DATABASE_URL)
+if not inspect(engine).has_table("citizens"):
+    print("Base tables not found, running init_db() first.")
+    init_db()
+
 with engine.begin() as conn:
     for module_name in MIGRATIONS:
         module = import_module(module_name)
