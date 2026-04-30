@@ -21,7 +21,8 @@ This version is matched to the actual model column names used in
     - Counts banner (citizens, tickets, conversations, actions, alerts)
     - Citizens (latest 10)
     - Tickets (latest 10)
-    - Live Conversations (latest 10) — the state machine of in-flight chats
+    - Live Conversations (latest 10)
+    - Active Conversations (latest 50) — the state machine of in-flight chats
     - Officer Messages (latest 10) — escalations to government officers
     - Agent Actions (latest 20) — audit trail
     - Agent Alerts (latest 10) — Master's queue
@@ -160,6 +161,8 @@ def render_tickets(db: Session) -> str:
     rows = [
         _row([
             _val(t, "id"),
+            _val(t, "ticket_id_human", default="—"),
+            _val(t, "category_code", default="—"),
             _val(t, "citizen_id"),
             _val(t, "category"),
             _val(t, "subcategory"),
@@ -171,7 +174,7 @@ def render_tickets(db: Session) -> str:
         for t in rows_obj
     ]
     return _table(
-        ["ID", "Citizen", "Category", "Issue", "Status", "Department", "Urgency", "Created"],
+        ["ID", "Ticket ID", "Category Code", "Citizen", "Category", "Issue", "Status", "Department", "Urgency", "Created"],
         rows,
         "No tickets yet.",
     )
@@ -464,9 +467,24 @@ def activity(db: Session = Depends(get_db)) -> HTMLResponse:
         counts=render_counts(db),
         citizens=render_citizens(db),
         tickets=render_tickets(db),
-        conversations=render_conversations(db),
+        conversations=render_conversations(db) + "<h3>Active Conversations</h3>" + render_active_conversations(db),
         officer_messages=render_officer_messages(db),
         actions=render_agent_actions(db),
         alerts=render_agent_alerts(db),
     )
     return HTMLResponse(content=html)
+
+
+def render_active_conversations(db: Session) -> str:
+    rows_obj = _safe_query(db, "CitizenConversation", "updated_at", 50)
+    rows = [
+        _row([
+            _val(c, "id"),
+            _val(c, "telegram_chat_id"),
+            _val(c, "current_state", "state"),
+            _val(c, "last_inbound_at", "updated_at"),
+            _truncate(_val_json(c, "draft_payload", "draft"), 80),
+        ])
+        for c in rows_obj
+    ]
+    return _table(["ID", "Telegram Chat", "Current State", "Last Inbound", "Draft Payload"], rows, "No active conversations.")
