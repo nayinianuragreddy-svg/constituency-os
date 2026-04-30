@@ -5,6 +5,7 @@ from typing import Any
 from app.core.llm import llm_call, load_prompt
 
 from . import globals as global_guards
+from .disambiguator import draft_disambiguation_reply
 from .types import DbWrite, StateResult
 
 
@@ -91,7 +92,13 @@ def process_message(conversation: dict, message: str, context: dict[str, Any]) -
             elif guard.__name__ == "g_off_path_fix":
                 result = import_module("app.agents.communication.off_path.fix_field").handle(conversation, message, context)
             else:
-                result = StateResult(next_state=context["current_state"], reply_text="I didn't understand. Please try again.")  # V1.9: route through reply_drafter for language-aware phrasing
+                reply = draft_disambiguation_reply(
+                    current_state=context["current_state"],
+                    last_bot_message=context.get("last_bot_message"),
+                    user_message=message,
+                    preferred_language=context.get("preferred_language", "en"),
+                )
+                result = StateResult(next_state=context["current_state"], reply_text=reply)
             _apply_writes(context, result.db_writes)
             _log_actions(context, [a.__dict__ for a in result.agent_actions_to_log])
             return result
