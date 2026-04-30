@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 import inspect
 import httpx
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.agents.communication.router import process_message
@@ -60,7 +61,12 @@ def process_incoming_update(db: Session, update: dict[str, Any], sender: Telegra
     if media:
         db.execute(__import__('sqlalchemy').text("INSERT INTO media_uploads (office_id,citizen_id,telegram_file_id,file_kind) VALUES (1,:citizen_id,:fid,:kind) ON CONFLICT (office_id,telegram_file_id) DO NOTHING"), {"citizen_id":getattr(convo,'citizen_id',None),"fid":media['file_id'],"kind":media['kind']})
 
-    context={"telegram_chat_id":str(chat_id),"office_id":1,"idempotency_key":idem,"media":media or {},"media_file_id":(media or {}).get('file_id'),"llm_enabled":True}
+    preferred_language = "en"
+    if convo.citizen_id:
+        row = db.execute(text("SELECT preferred_language FROM citizens WHERE id = :cid"), {"cid": convo.citizen_id}).fetchone()
+        if row and row[0]:
+            preferred_language = row[0]
+    context={"telegram_chat_id":str(chat_id),"office_id":1,"idempotency_key":idem,"media":media or {},"media_file_id":(media or {}).get('file_id'),"llm_enabled":True,"last_bot_message":getattr(convo,"last_bot_message",None),"preferred_language":preferred_language}
     context["db_write"]=lambda w: execute_db_write(db,w,context)
     context["log_action"]=lambda a: db.add(AgentAction(idempotency_key=f"{idem}:{a['action_type']}:{__import__('uuid').uuid4().hex}",channel="internal",action_type=a["action_type"],status="processed",payload=a,response_payload={}))
     context["persist_state"]=lambda s: setattr(convo,'current_state',s)
@@ -77,5 +83,7 @@ def process_incoming_update(db: Session, update: dict[str, Any], sender: Telegra
         send_result = sender.send_message(str(chat_id), send_text, reply_markup=markup)
     else:
         send_result = sender.send_message(str(chat_id), send_text)
+    if send_text:
+        convo.last_bot_message = send_text
     action.status="processed"; action.response_payload={"send_result":send_result}; db.commit()
     return {"status":"processed","next_state":result.next_state,"update_id":update_id}
