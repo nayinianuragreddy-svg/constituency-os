@@ -13,7 +13,7 @@ from app.telegram_adapter import TelegramApiClient, process_incoming_update
 
 
 def run_polling(poll_interval_seconds: float = 1.0) -> None:
-    load_dotenv()
+    load_dotenv(override=True)
     init_db()
 
     if not TELEGRAM_BOT_TOKEN:
