@@ -48,40 +48,27 @@ def upgrade() -> None:
     # -----------------------------------------------------------------------
     # Helper: validate_required_fields
     # Implements the Doc A v2.1 shape rule for required_fields JSONB arrays.
+    # SQL-language IMMUTABLE so Postgres can inline it into CHECK constraints.
     # Must exist before complaint_categories and complaint_subcategories.
     # -----------------------------------------------------------------------
     _x("""
         CREATE OR REPLACE FUNCTION validate_required_fields(fields JSONB)
         RETURNS BOOLEAN
-        LANGUAGE plpgsql
+        LANGUAGE sql
         IMMUTABLE
         AS $$
-        DECLARE
-            f JSONB;
-        BEGIN
-            IF jsonb_typeof(fields) != 'array' THEN
-                RETURN FALSE;
-            END IF;
-            FOR f IN SELECT * FROM jsonb_array_elements(fields)
-            LOOP
-                IF NOT (
-                    f ? 'name'     AND
-                    f ? 'type'     AND
-                    f ? 'required' AND
-                    f ? 'label_en' AND
-                    f ? 'label_te' AND
-                    f ? 'label_hi' AND
+            SELECT jsonb_typeof(fields) = 'array' AND NOT EXISTS (
+                SELECT 1 FROM jsonb_array_elements(fields) f
+                WHERE NOT (
+                    f ? 'name' AND f ? 'type' AND f ? 'required' AND
+                    f ? 'label_en' AND f ? 'label_te' AND f ? 'label_hi' AND
                     jsonb_typeof(f->'required') = 'boolean' AND
                     f->>'type' IN (
                         'enum', 'string', 'integer', 'date',
                         'phone', 'yes_no', 'free_text', 'media'
                     )
-                ) THEN
-                    RETURN FALSE;
-                END IF;
-            END LOOP;
-            RETURN TRUE;
-        END;
+                )
+            );
         $$
     """)
 
@@ -272,7 +259,31 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_messages_conversation ON messages(conversation_id, created_at DESC)")
 
     # -----------------------------------------------------------------------
-    # 9. tickets
+    # 9. officer_contacts  (must precede tickets — tickets.assigned_officer_id
+    #                       references officer_contacts.id)
+    # -----------------------------------------------------------------------
+    _x("""
+        CREATE TABLE officer_contacts (
+            id                   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+            name                 VARCHAR(255) NOT NULL,
+            title                VARCHAR(100),
+            department           VARCHAR(100),
+            queue_name           VARCHAR(50),
+            phone                VARCHAR(40),
+            email                VARCHAR(200),
+            mandal_id            UUID        REFERENCES mandals(id) ON DELETE RESTRICT,
+            ward_id              UUID        REFERENCES wards(id)   ON DELETE RESTRICT,
+            is_active            BOOLEAN     NOT NULL DEFAULT TRUE,
+            is_default_for_queue BOOLEAN     NOT NULL DEFAULT FALSE,
+            language_preference  VARCHAR(20),
+            created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    _x("CREATE INDEX idx_officer_contacts_queue ON officer_contacts(queue_name, is_active, is_default_for_queue)")
+
+    # -----------------------------------------------------------------------
+    # 10. tickets
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE tickets (
@@ -292,13 +303,19 @@ def upgrade() -> None:
                              )),
             priority         VARCHAR(20) NOT NULL DEFAULT 'normal'
                              CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
-            description      TEXT,
-            structured_data  JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            sla_due_at       TIMESTAMPTZ,
-            created_by_agent VARCHAR(50),
-            deleted_at       TIMESTAMPTZ,
-            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+            title               VARCHAR(200),
+            description         TEXT,
+            structured_data     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+            sla_due_at          TIMESTAMPTZ,
+            created_by_agent    VARCHAR(50),
+            assigned_officer_id UUID        REFERENCES officer_contacts(id) ON DELETE RESTRICT,
+            resolved_at         TIMESTAMPTZ,
+            resolution_notes    TEXT,
+            lat                 NUMERIC(9,6),
+            lng                 NUMERIC(9,6),
+            deleted_at          TIMESTAMPTZ,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
             CONSTRAINT chk_tickets_number CHECK (
                 ticket_number ~ '^[A-Z]{3}-[A-Z]{3}-[0-9]{6}-[0-9]{4}$'
             )
@@ -311,7 +328,7 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_tickets_conversation ON tickets(conversation_id)")
 
     # -----------------------------------------------------------------------
-    # 10. ticket_updates
+    # 11. ticket_updates
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE ticket_updates (
@@ -328,7 +345,7 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_ticket_updates_ticket ON ticket_updates(ticket_id, created_at DESC)")
 
     # -----------------------------------------------------------------------
-    # 11. media_uploads
+    # 12. media_uploads
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE media_uploads (
@@ -349,7 +366,7 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_media_uploads_citizen ON media_uploads(citizen_id)")
 
     # -----------------------------------------------------------------------
-    # 12. agent_actions
+    # 13. agent_actions
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE agent_actions (
@@ -372,7 +389,7 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_agent_actions_ticket  ON agent_actions(ticket_id,   created_at DESC) WHERE ticket_id   IS NOT NULL")
 
     # -----------------------------------------------------------------------
-    # 13. daily_ticket_sequences
+    # 14. daily_ticket_sequences
     # -----------------------------------------------------------------------
     _x(f"""
         CREATE TABLE daily_ticket_sequences (
@@ -387,7 +404,7 @@ def upgrade() -> None:
     """)
 
     # -----------------------------------------------------------------------
-    # 14. human_review_queue
+    # 15. human_review_queue
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE human_review_queue (
@@ -414,29 +431,6 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_hrq_assigned ON human_review_queue(assigned_to_user_id) WHERE status IN ('pending', 'in_progress')")
 
     # -----------------------------------------------------------------------
-    # 15. officer_contacts
-    # -----------------------------------------------------------------------
-    _x("""
-        CREATE TABLE officer_contacts (
-            id                   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-            name                 VARCHAR(255) NOT NULL,
-            title                VARCHAR(100),
-            department           VARCHAR(100),
-            queue_name           VARCHAR(50),
-            phone                VARCHAR(40),
-            email                VARCHAR(200),
-            mandal_id            UUID        REFERENCES mandals(id) ON DELETE RESTRICT,
-            ward_id              UUID        REFERENCES wards(id)   ON DELETE RESTRICT,
-            is_active            BOOLEAN     NOT NULL DEFAULT TRUE,
-            is_default_for_queue BOOLEAN     NOT NULL DEFAULT FALSE,
-            language_preference  VARCHAR(20),
-            created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-    """)
-    _x("CREATE INDEX idx_officer_contacts_queue ON officer_contacts(queue_name, is_active, is_default_for_queue)")
-
-    # -----------------------------------------------------------------------
     # 16. officer_messages
     # -----------------------------------------------------------------------
     _x("""
@@ -461,7 +455,7 @@ def upgrade() -> None:
     _x("CREATE INDEX idx_officer_messages_ticket  ON officer_messages(ticket_id,  created_at DESC)")
 
     # -----------------------------------------------------------------------
-    # 17. relationships  (schema only — Geo phase populates this)
+    # 17. relationships  (schema only — deferred for Geo Agent phase)
     # -----------------------------------------------------------------------
     _x("""
         CREATE TABLE relationships (
@@ -506,27 +500,20 @@ def upgrade() -> None:
 
     # -----------------------------------------------------------------------
     # Stored function: fn_citizen_registration_status  (Doc A v2.1 §2.6)
-    # Returns 'complete' | 'partial' | 'new' computed from a citizens row.
-    # Intended as a virtual/computed column callable via SQL.
+    # Returns TRUE when all four key fields are filled on a citizens row.
+    # BOOLEAN return mirrors registration_complete semantics.
     # -----------------------------------------------------------------------
     _x("""
         CREATE OR REPLACE FUNCTION fn_citizen_registration_status(c citizens)
-        RETURNS TEXT
+        RETURNS BOOLEAN
         LANGUAGE plpgsql
-        STABLE
+        IMMUTABLE
         AS $$
         BEGIN
-            IF c.registration_complete THEN
-                RETURN 'complete';
-            END IF;
-            IF c.name        IS NOT NULL
-               AND c.mobile  IS NOT NULL
-               AND c.ward_id IS NOT NULL
-               AND c.mandal_id IS NOT NULL
-            THEN
-                RETURN 'partial';
-            END IF;
-            RETURN 'new';
+            RETURN c.name      IS NOT NULL
+               AND c.mobile    IS NOT NULL
+               AND c.ward_id   IS NOT NULL
+               AND c.mandal_id IS NOT NULL;
         END;
         $$
     """)
@@ -546,24 +533,24 @@ def downgrade() -> None:
     # no type dependency, so it can go here or after; drop early for clarity.
     _x("DROP FUNCTION IF EXISTS allocate_ticket_number(VARCHAR)")
 
-    # tables in strict reverse FK-dependency order
-    _x("DROP TABLE IF EXISTS relationships")
-    _x("DROP TABLE IF EXISTS officer_messages")
-    _x("DROP TABLE IF EXISTS officer_contacts")
-    _x("DROP TABLE IF EXISTS human_review_queue")
-    _x("DROP TABLE IF EXISTS daily_ticket_sequences")
-    _x("DROP TABLE IF EXISTS agent_actions")
-    _x("DROP TABLE IF EXISTS media_uploads")
-    _x("DROP TABLE IF EXISTS ticket_updates")
-    _x("DROP TABLE IF EXISTS tickets")
-    _x("DROP TABLE IF EXISTS messages")
-    _x("DROP TABLE IF EXISTS conversations")
-    _x("DROP TABLE IF EXISTS citizens")
-    _x("DROP TABLE IF EXISTS complaint_subcategories")
-    _x("DROP TABLE IF EXISTS complaint_categories")
-    _x("DROP TABLE IF EXISTS wards")
-    _x("DROP TABLE IF EXISTS mandals")
-    _x("DROP TABLE IF EXISTS constituencies")
+    # tables in strict reverse creation order (17 → 1)
+    _x("DROP TABLE IF EXISTS relationships")       # 17
+    _x("DROP TABLE IF EXISTS officer_messages")    # 16
+    _x("DROP TABLE IF EXISTS human_review_queue")  # 15
+    _x("DROP TABLE IF EXISTS daily_ticket_sequences")  # 14
+    _x("DROP TABLE IF EXISTS agent_actions")       # 13
+    _x("DROP TABLE IF EXISTS media_uploads")       # 12
+    _x("DROP TABLE IF EXISTS ticket_updates")      # 11
+    _x("DROP TABLE IF EXISTS tickets")             # 10
+    _x("DROP TABLE IF EXISTS officer_contacts")    # 9
+    _x("DROP TABLE IF EXISTS messages")            # 8
+    _x("DROP TABLE IF EXISTS conversations")       # 7
+    _x("DROP TABLE IF EXISTS citizens")            # 6
+    _x("DROP TABLE IF EXISTS complaint_subcategories")  # 5
+    _x("DROP TABLE IF EXISTS complaint_categories")     # 4
+    _x("DROP TABLE IF EXISTS wards")               # 3
+    _x("DROP TABLE IF EXISTS mandals")             # 2
+    _x("DROP TABLE IF EXISTS constituencies")      # 1
 
     # validate_required_fields is referenced by CHECK constraints on
     # complaint_categories and complaint_subcategories; drop it last,
