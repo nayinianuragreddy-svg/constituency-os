@@ -25,3 +25,11 @@ Thumbs.db
 
 # Misc
 constituency-os/
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+*.cover
+.hypothesis/
