@@ -1,7 +1,8 @@
-"""Unit tests for BaseAgent skeleton from PR 4a.
+"""Unit tests for BaseAgent skeleton — updated in PR 4e.
 
-These tests confirm the abstract class enforces the contract correctly.
-Real dispatch tests come in PR 4e.
+PR 4e makes dispatch() concrete and introduces response_schema() as the new
+abstract method. Unit tests use object() sentinels for engine/llm_client/
+prompt_renderer since contract-enforcement tests do not exercise real dispatch.
 """
 
 import pytest
@@ -12,6 +13,14 @@ class _StubAgent(BaseAgent):
     """Minimal subclass for testing the contract enforcement."""
     agent_name = "test_stub"
     runtime_pattern = "reactive"
+
+    def response_schema(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {"reply_text": {"type": "string"}},
+            "required": ["reply_text"],
+            "additionalProperties": False,
+        }
 
     def dispatch(self, context: AgentContext) -> AgentResult:
         return AgentResult(
@@ -28,26 +37,26 @@ def test_subclass_without_agent_name_raises():
     class BadAgent(BaseAgent):
         runtime_pattern = "reactive"
 
-        def dispatch(self, context):
-            return AgentResult(None, [], 0.0, 0, False, None)
+        def response_schema(self) -> dict:
+            return {}
 
     with pytest.raises(ValueError, match="agent_name"):
-        BadAgent()
+        BadAgent(engine=object(), llm_client=object(), prompt_renderer=object())
 
 
 def test_subclass_without_runtime_pattern_raises():
     class BadAgent(BaseAgent):
         agent_name = "x"
 
-        def dispatch(self, context):
-            return AgentResult(None, [], 0.0, 0, False, None)
+        def response_schema(self) -> dict:
+            return {}
 
     with pytest.raises(ValueError, match="runtime_pattern"):
-        BadAgent()
+        BadAgent(engine=object(), llm_client=object(), prompt_renderer=object())
 
 
 def test_stub_agent_instantiates_and_dispatches():
-    agent = _StubAgent()
+    agent = _StubAgent(engine=object(), llm_client=object(), prompt_renderer=object())
     ctx = AgentContext(
         conversation_id="00000000-0000-0000-0000-000000000001",
         incoming_message="hello",
@@ -57,20 +66,3 @@ def test_stub_agent_instantiates_and_dispatches():
     result = agent.dispatch(ctx)
     assert result.reply_text == "stub"
     assert result.escalated is False
-
-
-def test_unimplemented_methods_raise_not_implemented():
-    """The four methods that PR 4e implements should raise NotImplementedError in PR 4a."""
-    agent = _StubAgent()
-    ctx = AgentContext(
-        conversation_id="00000000-0000-0000-0000-000000000001",
-        incoming_message="hello",
-        incoming_message_script="roman",
-        citizen_id=None,
-    )
-    with pytest.raises(NotImplementedError, match="PR 4e"):
-        agent.read_state(ctx)
-    with pytest.raises(NotImplementedError, match="PR 4e"):
-        agent.call_llm([], [])
-    with pytest.raises(NotImplementedError, match="PR 4e"):
-        agent.log_action({})
