@@ -3,9 +3,8 @@
 Per Doc B v2.1 §4. Every dispatch call writes one row recording what the agent
 did, the cost, hops used, and any error.
 
-The agent_actions table has no dedicated cost_usd / hops_used / error columns;
-those values are stored inside the payload JSONB under the keys _cost_usd,
-_hops_used, and _error. The status column is set to 'success' or 'error'.
+cost_usd, hops_used, and error are written to their dedicated columns (added in
+migration 0006). The status column is set to 'success' or 'error'.
 """
 
 from __future__ import annotations
@@ -37,16 +36,11 @@ class ActionLogger:
 
         action_type is a short string like 'dispatch', 'tool_call', 'escalation'.
         payload is anything serialisable to jsonb that captures what happened.
-        cost_usd, hops_used, and error are stored inside payload under _cost_usd,
-        _hops_used, and _error keys since the table has no dedicated columns for them.
+        cost_usd, hops_used, and error are written to their dedicated columns.
         """
         action_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         status = "error" if error else "success"
-
-        full_payload = {**payload, "_cost_usd": cost_usd, "_hops_used": hops_used}
-        if error:
-            full_payload["_error"] = error
 
         with self._engine.begin() as conn:
             conn.execute(
@@ -54,10 +48,14 @@ class ActionLogger:
                     """
                     INSERT INTO agent_actions
                         (id, agent_name, action_type, conversation_id,
-                         payload, response, status, created_at)
+                         payload, response, status,
+                         cost_usd, hops_used, error,
+                         created_at)
                     VALUES
                         (:id, :agent_name, :action_type, :conversation_id,
-                         :payload, :response, :status, :created_at)
+                         :payload, :response, :status,
+                         :cost_usd, :hops_used, :error,
+                         :created_at)
                     """
                 ),
                 {
@@ -65,9 +63,12 @@ class ActionLogger:
                     "agent_name": agent_name,
                     "action_type": action_type,
                     "conversation_id": conversation_id,
-                    "payload": json.dumps(full_payload),
+                    "payload": json.dumps(payload),
                     "response": "{}",
                     "status": status,
+                    "cost_usd": cost_usd,
+                    "hops_used": hops_used,
+                    "error": error,
                     "created_at": now,
                 },
             )

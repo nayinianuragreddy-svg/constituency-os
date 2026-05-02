@@ -130,11 +130,12 @@ def test_dispatch_end_to_end(stub_agent, seeded_conversation, seeded_test_db_eng
 
     # Confirm the action was logged.
     # agent_actions schema: id, agent_name, action_type, citizen_id, ticket_id,
-    # conversation_id, payload (JSONB), response (JSONB), status, idempotency_key, created_at
+    # conversation_id, payload (JSONB), response (JSONB), status, idempotency_key,
+    # cost_usd, hops_used, error, created_at
     with seeded_test_db_engine.connect() as conn:
         rows = conn.execute(
             sa.text(
-                "SELECT action_type, payload, status FROM agent_actions WHERE conversation_id = :cid"
+                "SELECT action_type, cost_usd, error, status FROM agent_actions WHERE conversation_id = :cid"
             ),
             {"cid": seeded_conversation},
         ).fetchall()
@@ -144,13 +145,9 @@ def test_dispatch_end_to_end(stub_agent, seeded_conversation, seeded_test_db_eng
     assert len(dispatch_rows) >= 1
 
     last = dispatch_rows[-1]
-    assert last[2] == "success"  # status column
-
-    # payload is returned as dict by psycopg/SQLAlchemy for JSONB columns
-    payload = last[1]
-    if isinstance(payload, str):
-        payload = json.loads(payload)
-    assert payload.get("_cost_usd", 0) > 0
+    assert last[3] == "success"  # status column
+    assert float(last[1]) > 0    # cost_usd dedicated column
+    assert last[2] is None       # error is NULL on success
 
 
 @pytest.mark.live
