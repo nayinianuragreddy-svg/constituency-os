@@ -30,3 +30,34 @@ def openai_client():
 def communication_model():
     """The model name configured for the Communication Agent."""
     return os.getenv("LLM_MODEL_COMMUNICATION", "gpt-4o-mini")
+
+
+@pytest.fixture(scope="session")
+def seeded_test_db_engine():
+    """Boot a fresh test database, run all migrations, yield a SQLAlchemy engine.
+
+    The DB is dropped at session teardown.
+    """
+    import subprocess
+    import sqlalchemy as sa
+
+    db_user = os.getenv("USER", "postgres")
+    db_name = "constituency_os_pytest"
+    base_url = f"postgresql+psycopg://{db_user}@localhost:5432"
+    db_url = f"{base_url}/{db_name}"
+
+    subprocess.run(["dropdb", "--if-exists", db_name], check=True)
+    subprocess.run(["createdb", db_name], check=True)
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = db_url
+    subprocess.run(
+        ["alembic", "-c", "alembic.ini", "upgrade", "head"],
+        env=env,
+        check=True,
+    )
+
+    engine = sa.create_engine(db_url)
+    yield engine
+    engine.dispose()
+    subprocess.run(["dropdb", "--if-exists", db_name], check=False)
