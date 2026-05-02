@@ -13,7 +13,6 @@ Doc C v2.1 §3 spec:
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Optional
 
@@ -22,8 +21,6 @@ from sqlalchemy.engine import Engine
 from app.agents.base import BaseAgent, AgentContext, AgentResult
 from app.agents.runtime import (
     LLMClient,
-    LLMResponse,
-    LLMClientError,
     PromptRenderer,
     StructuredDataValidator,
     SubstringGroundingChecker,
@@ -33,70 +30,6 @@ from app.agents.communication_v2.tools import (
     LoadCategorySchema,
     AddToHistory,
 )
-
-
-class _RobustLLMClient(LLMClient):
-    """Wraps LLMClient to tolerate models (e.g. gpt-5.4-mini) that emit the JSON
-    response body twice, which causes json.loads to raise 'Extra data'.
-    Uses JSONDecoder.raw_decode() to extract only the first valid JSON object.
-    """
-
-    def call(
-        self,
-        model: str,
-        system_prompt: str,
-        user_message: str,
-        response_schema: dict,
-        max_completion_tokens: int = 1000,
-    ) -> LLMResponse:
-        try:
-            resp = self._client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "agent_response",
-                        "strict": True,
-                        "schema": response_schema,
-                    },
-                },
-                max_completion_tokens=max_completion_tokens,
-            )
-        except Exception as exc:
-            raise LLMClientError(f"OpenAI call failed: {exc!r}") from exc
-
-        choice = resp.choices[0]
-        raw_text = choice.message.content or ""
-
-        if not raw_text and getattr(choice.message, "refusal", None):
-            raise LLMClientError(f"OpenAI refused: {choice.message.refusal}")
-
-        try:
-            # raw_decode stops after the first valid JSON object, tolerating
-            # duplicate-response models that append the same JSON a second time.
-            parsed, _ = json.JSONDecoder().raw_decode(raw_text.strip())
-        except json.JSONDecodeError as exc:
-            raise LLMClientError(
-                f"OpenAI returned non-JSON content under structured output: {raw_text[:200]!r}"
-            ) from exc
-
-        usage = resp.usage
-        in_tok = getattr(usage, "prompt_tokens", 0) or 0
-        out_tok = getattr(usage, "completion_tokens", 0) or 0
-        cost = self._estimate_cost(model, in_tok, out_tok)
-
-        return LLMResponse(
-            parsed=parsed,
-            raw_text=raw_text,
-            model=model,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            cost_usd=cost,
-        )
 
 
 PROMPT_PATH = os.path.join(
@@ -118,7 +51,7 @@ class CommunicationAgent(BaseAgent):
         constituency_config: Optional[dict] = None,
         model: Optional[str] = None,
     ) -> None:
-        llm_client = llm_client or _RobustLLMClient()
+        llm_client = llm_client or LLMClient()
         prompt_renderer = PromptRenderer(
             agent_name=self.agent_name,
             prompt_template_path=PROMPT_PATH,

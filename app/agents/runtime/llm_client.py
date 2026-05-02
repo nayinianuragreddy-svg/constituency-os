@@ -94,7 +94,9 @@ class LLMClient:
             raise LLMClientError(f"OpenAI refused: {choice.message.refusal}")
 
         try:
-            parsed = json.loads(raw_text)
+            # Use raw_decode to tolerate gpt-5.4-mini occasionally double-emitting
+            # the structured-output JSON body. See HANDOFF v5 Section 11 mode 15.
+            parsed, _ = json.JSONDecoder().raw_decode(raw_text.strip())
         except json.JSONDecodeError as exc:
             raise LLMClientError(
                 f"OpenAI returned non-JSON content under structured output: {raw_text[:200]!r}"
