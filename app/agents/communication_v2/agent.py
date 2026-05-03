@@ -13,28 +13,31 @@ Doc C v2.1 §3 spec:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 
 from sqlalchemy.engine import Engine
 
 from app.agents.base import BaseAgent, AgentContext, AgentResult
-from app.agents.runtime import (
-    LLMClient,
-    PromptRenderer,
-    StructuredDataValidator,
-    SubstringGroundingChecker,
-)
+from app.agents.runtime import LLMClient, PromptRenderer, StructuredDataValidator, SubstringGroundingChecker
 from app.agents.communication_v2.tools import (
     SaveCitizenField,
     LoadCategorySchema,
     AddToHistory,
+    ExtractStructuredData,
+    ConfirmWithCitizen,
 )
 
+logger = logging.getLogger(__name__)
 
 PROMPT_PATH = os.path.join(
     os.path.dirname(__file__), "prompts", "system_v2_1.md"
 )
+
+# Tools whose successful execution warrants re-invoking the LLM so it can react
+# to the updated state (e.g. schema just loaded, fields just persisted).
+_STATE_CHANGING_TOOLS = {"load_category_schema", "extract_structured_data", "confirm_with_citizen"}
 
 
 class CommunicationAgent(BaseAgent):
@@ -71,13 +74,14 @@ class CommunicationAgent(BaseAgent):
             "name": "this constituency",
         }
 
-        # Tool registry — three tools for PR 5a; PR 5b and 5c add the rest.
         self._tools = {
             t.name: t
             for t in [
                 SaveCitizenField(),
                 LoadCategorySchema(),
                 AddToHistory(),
+                ExtractStructuredData(),
+                ConfirmWithCitizen(),
             ]
         }
 
@@ -87,10 +91,8 @@ class CommunicationAgent(BaseAgent):
         tool_calls is required (not optional) because OpenAI strict mode requires all
         declared properties to be in 'required'. The LLM returns [] when no tools are needed.
 
-        arguments uses anyOf with one branch per tool. This is the strict-mode-compatible
-        way to have a free-form arguments object: each branch defines the exact allowed
-        properties for one tool with additionalProperties=false. The LLM picks the branch
-        that matches the tool being called.
+        arguments uses anyOf with one branch per tool. Each branch defines the exact allowed
+        properties for one tool with additionalProperties=false.
         """
         return {
             "type": "object",
@@ -133,6 +135,37 @@ class CommunicationAgent(BaseAgent):
                                         "required": ["role", "text"],
                                         "additionalProperties": False,
                                     },
+                                    # extract_structured_data
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "subcategory_code": {"type": "string"},
+                                            "source_text": {"type": "string"},
+                                            "extracted_fields": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "field_name": {"type": "string"},
+                                                        "value": {"type": "string"},
+                                                    },
+                                                    "required": ["field_name", "value"],
+                                                    "additionalProperties": False,
+                                                },
+                                            },
+                                        },
+                                        "required": ["subcategory_code", "source_text", "extracted_fields"],
+                                        "additionalProperties": False,
+                                    },
+                                    # confirm_with_citizen
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "language": {"type": "string"},
+                                        },
+                                        "required": ["language"],
+                                        "additionalProperties": False,
+                                    },
                                 ]
                             },
                         },
@@ -146,77 +179,120 @@ class CommunicationAgent(BaseAgent):
         }
 
     def dispatch(self, context: AgentContext) -> AgentResult:
-        """Override BaseAgent.dispatch to add tool execution after the LLM call.
+        """Multi-hop dispatch loop (up to max_hops per Doc C §3).
 
-        Flow:
-        1. Read state from DB.
-        2. Render system prompt.
-        3. Call LLM with structured output.
-        4. Execute any tool_calls returned by the LLM.
-        5. Log the dispatch to agent_actions.
-        6. Return AgentResult.
+        Each hop:
+        1. Re-reads state so the LLM sees the latest DB values.
+        2. Renders the system prompt including any loaded schema.
+        3. Calls the LLM.
+        4. Executes all tool_calls from the response.
+        5. Stops if no state-changing tool succeeded (reply is ready),
+           otherwise hops again so the LLM can react.
         """
-        try:
-            summary = self._state_reader.read(context.conversation_id)
-        except Exception as exc:
-            return self._fail("read_state_failed", context, str(exc))
+        total_cost = 0.0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        all_tool_calls_made: list[dict] = []
+        final_reply_text: Optional[str] = None
+        hops_used = 0
+        extract_ever_ran = False  # track across all hops
 
-        try:
-            system_prompt = self._prompt_renderer.render(
-                conversation_summary=summary,
-                category_schema=None,
-                constituency_config=self._constituency_config,
-            )
-        except Exception as exc:
-            return self._fail("render_failed", context, str(exc))
+        for hop in range(self.max_hops):
+            hops_used = hop + 1
 
-        try:
-            llm_response = self._llm_client.call(
-                model=self._model,
-                system_prompt=system_prompt,
-                user_message=context.incoming_message,
-                response_schema=self.response_schema(),
-                max_completion_tokens=8000,
-            )
-        except Exception as exc:
-            return self._fail("llm_call_failed", context, str(exc))
+            # Re-read state on every hop so each LLM turn sees current DB values
+            try:
+                summary = self._state_reader.read(context.conversation_id)
+            except Exception as exc:
+                return self._fail("read_state_failed", context, str(exc),
+                                  cost_usd=total_cost)
 
-        parsed = llm_response.parsed
-
-        # Execute tool calls
-        tool_calls_made = []
-        for call in parsed.get("tool_calls") or []:
-            tool_name = call.get("name")
-            tool_args = call.get("arguments") or {}
-            tool = self._tools.get(tool_name)
-
-            if tool is None:
-                tool_calls_made.append({
-                    "name": tool_name,
-                    "args": tool_args,
-                    "success": False,
-                    "error": f"unknown tool: {tool_name}",
-                })
-                continue
+            category_schema = self._extract_schema_for_prompt(summary)
 
             try:
-                result = tool.execute(tool_args, self._engine, context.conversation_id)
+                system_prompt = self._prompt_renderer.render(
+                    conversation_summary=summary,
+                    category_schema=category_schema,
+                    constituency_config=self._constituency_config,
+                )
             except Exception as exc:
-                tool_calls_made.append({
-                    "name": tool_name,
-                    "args": tool_args,
-                    "success": False,
-                    "error": f"tool raised: {exc!r}",
-                })
-                continue
+                return self._fail("render_failed", context, str(exc),
+                                  cost_usd=total_cost)
 
-            tool_calls_made.append({
-                "name": tool_name,
-                "args": tool_args,
-                "success": result.success,
-                "data": result.data,
-                "error": result.error,
-            })
+            try:
+                llm_response = self._llm_client.call(
+                    model=self._model,
+                    system_prompt=system_prompt,
+                    user_message=context.incoming_message,
+                    response_schema=self.response_schema(),
+                    max_completion_tokens=8000,
+                )
+            except Exception as exc:
+                return self._fail("llm_call_failed", context, str(exc),
+                                  cost_usd=total_cost)
+
+            total_cost += llm_response.cost_usd
+            total_input_tokens += llm_response.input_tokens
+            total_output_tokens += llm_response.output_tokens
+
+            parsed = llm_response.parsed
+            reply_text = parsed.get("reply_text") or ""
+            if reply_text:
+                final_reply_text = reply_text
+
+            # Execute all tool calls and track what happened this hop
+            schema_loaded_this_hop = False
+            extract_ran = False
+            all_required = False
+            confirmed = False
+
+            for call in parsed.get("tool_calls") or []:
+                tool_result = self._execute_tool(call, context.conversation_id)
+                all_tool_calls_made.append(tool_result)
+                name = call.get("name")
+
+                if tool_result.get("success"):
+                    if name == "load_category_schema":
+                        schema_loaded_this_hop = True
+                    elif name == "extract_structured_data":
+                        extract_ran = True
+                        extract_ever_ran = True
+                        if (tool_result.get("data") or {}).get("all_required_collected"):
+                            all_required = True
+                    elif name == "confirm_with_citizen":
+                        readback = (tool_result.get("data") or {}).get("readback_text")
+                        if readback:
+                            final_reply_text = readback
+                        confirmed = True
+
+            # When all required fields are collected, auto-trigger confirm_with_citizen
+            # if the LLM didn't call it in this hop. The readback is deterministic so we
+            # don't need another LLM turn just to ask for confirmation.
+            if all_required and not confirmed:
+                auto_call = {"name": "confirm_with_citizen", "arguments": {"language": "english"}}
+                auto_result = self._execute_tool(auto_call, context.conversation_id)
+                all_tool_calls_made.append(auto_result)
+                if auto_result.get("success"):
+                    readback = (auto_result.get("data") or {}).get("readback_text")
+                    if readback:
+                        final_reply_text = readback
+                    confirmed = True
+
+            # Re-hop ONLY when load_category_schema just ran and the LLM hasn't yet had a
+            # chance to extract fields with the newly visible schema. All other outcomes
+            # (confirmed, extract ran with pending fields, or no schema change) mean the
+            # current reply_text is ready to send.
+            should_rehop = schema_loaded_this_hop and not extract_ran and not confirmed
+            if not should_rehop:
+                break
+
+        # If we exhausted hops without a reply, log a warning
+        if not final_reply_text:
+            logger.warning(
+                "dispatch exhausted %d hops without a reply_text (conversation_id=%s)",
+                hops_used,
+                context.conversation_id,
+            )
 
         # Log to agent_actions
         try:
@@ -226,24 +302,90 @@ class CommunicationAgent(BaseAgent):
                 action_type="dispatch",
                 payload={
                     "incoming_message": context.incoming_message,
-                    "parsed": parsed,
-                    "model": llm_response.model,
-                    "input_tokens": llm_response.input_tokens,
-                    "output_tokens": llm_response.output_tokens,
-                    "tool_calls": tool_calls_made,
+                    "hops": hops_used,
+                    "tool_calls": all_tool_calls_made,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
                 },
-                cost_usd=llm_response.cost_usd,
-                hops_used=1,
+                cost_usd=total_cost,
+                hops_used=hops_used,
                 error=None,
             )
         except Exception:
             pass
 
         return AgentResult(
-            reply_text=parsed.get("reply_text"),
-            tool_calls_made=tool_calls_made,
-            cost_usd=llm_response.cost_usd,
-            hops_used=1,
+            reply_text=final_reply_text,
+            tool_calls_made=all_tool_calls_made,
+            cost_usd=total_cost,
+            hops_used=hops_used,
             escalated=False,
             error=None,
         )
+
+    def _execute_tool(self, call: dict, conversation_id: str) -> dict:
+        """Execute a single tool call and return a structured result dict."""
+        tool_name = call.get("name")
+        tool_args = call.get("arguments") or {}
+        tool = self._tools.get(tool_name)
+
+        if tool is None:
+            return {
+                "name": tool_name,
+                "args": tool_args,
+                "success": False,
+                "error": f"unknown tool: {tool_name}",
+            }
+
+        try:
+            result = tool.execute(tool_args, self._engine, conversation_id)
+        except Exception as exc:
+            return {
+                "name": tool_name,
+                "args": tool_args,
+                "success": False,
+                "error": f"tool raised: {exc!r}",
+            }
+
+        return {
+            "name": tool_name,
+            "args": tool_args,
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+        }
+
+    def _extract_schema_for_prompt(self, summary: dict) -> Optional[dict]:
+        """If a category schema is loaded in state, fetch it for the PromptRenderer.
+
+        Returns a dict in the shape PromptRenderer._format_schema expects:
+        {"subcategory_code": str, "fields": [...]}
+        or None if no schema is loaded.
+        """
+        current_complaint = summary.get("current_complaint") or {}
+        if not current_complaint.get("category_schema_loaded"):
+            return None
+
+        subcategory_code = current_complaint.get("subcategory_code")
+        if not subcategory_code:
+            return None
+
+        try:
+            import sqlalchemy as sa
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    sa.text(
+                        "SELECT required_fields, display_name_en"
+                        " FROM complaint_subcategories WHERE code = :code"
+                    ),
+                    {"code": subcategory_code},
+                ).fetchone()
+            if row is None:
+                return None
+            fields = row[0]
+            if isinstance(fields, str):
+                import json
+                fields = json.loads(fields)
+            return {"subcategory_code": subcategory_code, "fields": fields or []}
+        except Exception:
+            return None
