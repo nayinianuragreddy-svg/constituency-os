@@ -27,6 +27,9 @@ from app.agents.communication_v2.tools import (
     AddToHistory,
     ExtractStructuredData,
     ConfirmWithCitizen,
+    CreateTicket,
+    LookupTicketByNumber,
+    EscalateToHuman,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,7 +40,10 @@ PROMPT_PATH = os.path.join(
 
 # Tools whose successful execution warrants re-invoking the LLM so it can react
 # to the updated state (e.g. schema just loaded, fields just persisted).
-_STATE_CHANGING_TOOLS = {"load_category_schema", "extract_structured_data", "confirm_with_citizen"}
+_STATE_CHANGING_TOOLS = {
+    "load_category_schema", "extract_structured_data", "confirm_with_citizen",
+    "create_ticket", "escalate_to_human",
+}
 
 
 class CommunicationAgent(BaseAgent):
@@ -82,6 +88,9 @@ class CommunicationAgent(BaseAgent):
                 AddToHistory(),
                 ExtractStructuredData(),
                 ConfirmWithCitizen(),
+                CreateTicket(),
+                LookupTicketByNumber(),
+                EscalateToHuman(),
             ]
         }
 
@@ -166,6 +175,48 @@ class CommunicationAgent(BaseAgent):
                                         "required": ["language"],
                                         "additionalProperties": False,
                                     },
+                                    # create_ticket
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "citizen_confirmation": {
+                                                "type": "string",
+                                                "enum": ["yes", "confirmed", "correct", "ok", "haan", "avunu"],
+                                            },
+                                        },
+                                        "required": ["citizen_confirmation"],
+                                        "additionalProperties": False,
+                                    },
+                                    # lookup_ticket_by_number
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "ticket_number": {"type": "string"},
+                                            "caller": {
+                                                "type": "string",
+                                                "enum": ["communication", "dashboard", "master", "department"],
+                                            },
+                                        },
+                                        "required": ["ticket_number", "caller"],
+                                        "additionalProperties": False,
+                                    },
+                                    # escalate_to_human
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "reason_category": {
+                                                "type": "string",
+                                                "enum": ["safety_emergency", "suspicious_activity", "out_of_scope", "other"],
+                                            },
+                                            "reason_summary": {"type": "string"},
+                                            "suggested_priority": {
+                                                "type": "string",
+                                                "enum": ["urgent", "normal"],
+                                            },
+                                        },
+                                        "required": ["reason_category", "reason_summary", "suggested_priority"],
+                                        "additionalProperties": False,
+                                    },
                                 ]
                             },
                         },
@@ -245,6 +296,8 @@ class CommunicationAgent(BaseAgent):
             extract_ran = False
             all_required = False
             confirmed = False
+            ticket_filed_this_hop = False
+            ticket_number_filed: Optional[str] = None
 
             for call in parsed.get("tool_calls") or []:
                 tool_result = self._execute_tool(call, context.conversation_id)
@@ -264,6 +317,9 @@ class CommunicationAgent(BaseAgent):
                         if readback:
                             final_reply_text = readback
                         confirmed = True
+                    elif name == "create_ticket":
+                        ticket_filed_this_hop = True
+                        ticket_number_filed = (tool_result.get("data") or {}).get("ticket_number")
 
             # When all required fields are collected, auto-trigger confirm_with_citizen
             # if the LLM didn't call it in this hop. The readback is deterministic so we
@@ -277,6 +333,24 @@ class CommunicationAgent(BaseAgent):
                     if readback:
                         final_reply_text = readback
                     confirmed = True
+
+            # If create_ticket succeeded this hop, ensure the ticket number appears in the reply.
+            # The LLM composes reply_text before tool results are known, so we append the ticket
+            # number here rather than re-hopping (which would cause duplicate ticket creation).
+            if ticket_filed_this_hop and ticket_number_filed:
+                if ticket_number_filed not in (final_reply_text or ""):
+                    if final_reply_text:
+                        final_reply_text = (
+                            f"{final_reply_text.rstrip()} "
+                            f"Your ticket number is {ticket_number_filed}. "
+                            "Our team will review it shortly."
+                        )
+                    else:
+                        final_reply_text = (
+                            f"Your complaint has been registered. "
+                            f"Ticket number: {ticket_number_filed}. "
+                            "Our team will review it shortly."
+                        )
 
             # Re-hop ONLY when load_category_schema just ran and the LLM hasn't yet had a
             # chance to extract fields with the newly visible schema. All other outcomes
