@@ -8,10 +8,12 @@ Behavior:
 - After the write, recompute registration_complete (true iff name, mobile, ward_id, mandal_id all present).
 
 Allowed field names (matching actual citizens table columns from migration 0001):
-  name, mobile, ward_id, mandal_id, voter_id, dob, village.
+  name, mobile, ward_id, mandal_id, voter_id, dob, village,
+  pincode, gender, preferred_language, location_lat, location_lng, ward_number.
 
 Note: the citizens table has no 'address' column; 'village' is the free-text
 location field. 'dob' is a DATE column; pass ISO string YYYY-MM-DD.
+'location_lat' maps to the 'lat' column; 'location_lng' maps to the 'lng' column.
 
 Validation:
 - name: non-empty string
@@ -20,6 +22,12 @@ Validation:
 - voter_id: optional, free-form string
 - dob: ISO date YYYY-MM-DD
 - village: free-form string
+- pincode: 6-digit Indian PIN (regex ^[1-9]\\d{5}$)
+- gender: one of {"male", "female", "other", "prefer_not_to_say"}
+- preferred_language: one of {"english", "telugu", "hindi"}
+- location_lat: float between -90 and 90 (stored in citizens.lat)
+- location_lng: float between -180 and 180 (stored in citizens.lng)
+- ward_number: integer between 1 and 30 (stored in citizens.ward_number)
 """
 
 from __future__ import annotations
@@ -33,8 +41,20 @@ from sqlalchemy.engine import Engine
 from app.agents.communication_v2.tools.base import Tool, ToolResult, ToolError
 
 
-ALLOWED_FIELDS = {"name", "mobile", "ward_id", "mandal_id", "voter_id", "dob", "village"}
+ALLOWED_FIELDS = {
+    "name", "mobile", "ward_id", "mandal_id", "voter_id", "dob", "village",
+    "pincode", "gender", "preferred_language", "location_lat", "location_lng", "ward_number",
+}
 MOBILE_PATTERN = re.compile(r"^[6-9]\d{9}$")
+PINCODE_PATTERN = re.compile(r"^[1-9]\d{5}$")
+GENDER_VALUES = {"male", "female", "other", "prefer_not_to_say"}
+LANGUAGE_VALUES = {"english", "telugu", "hindi"}
+
+# Map logical field names to actual DB column names (where they differ)
+_FIELD_TO_COLUMN = {
+    "location_lat": "lat",
+    "location_lng": "lng",
+}
 
 
 class SaveCitizenField(Tool):
@@ -42,7 +62,8 @@ class SaveCitizenField(Tool):
     description = (
         "Save a single field on the citizen's record. "
         "Use this when the citizen has provided their name, mobile, ward, mandal, "
-        "voter ID, date of birth, or village/address."
+        "voter ID, date of birth, village/address, pincode, gender, preferred language, "
+        "GPS coordinates, or ward number."
     )
     input_schema = {
         "type": "object",
@@ -57,7 +78,9 @@ class SaveCitizenField(Tool):
                 "description": (
                     "The value to save. "
                     "For ward_id and mandal_id, pass the UUID as a string. "
-                    "For dob, pass ISO date YYYY-MM-DD."
+                    "For dob, pass ISO date YYYY-MM-DD. "
+                    "For location_lat/location_lng, pass a decimal number as string. "
+                    "For ward_number, pass an integer as string."
                 ),
             },
         },
@@ -92,6 +115,63 @@ class SaveCitizenField(Tool):
                 return ToolResult(
                     success=False, data={}, error=f"{field_name} must be a valid UUID"
                 )
+        elif field_name == "pincode":
+            if not PINCODE_PATTERN.match(value):
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error=f"pincode must be a 6-digit Indian PIN (^[1-9]\\d{{5}}$): {value!r}",
+                )
+        elif field_name == "gender":
+            if value not in GENDER_VALUES:
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error=f"gender must be one of {sorted(GENDER_VALUES)}: {value!r}",
+                )
+        elif field_name == "preferred_language":
+            if value not in LANGUAGE_VALUES:
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error=f"preferred_language must be one of {sorted(LANGUAGE_VALUES)}: {value!r}",
+                )
+        elif field_name == "location_lat":
+            try:
+                lat = float(value)
+            except (ValueError, TypeError):
+                return ToolResult(
+                    success=False, data={}, error=f"location_lat must be a float: {value!r}"
+                )
+            if not (-90 <= lat <= 90):
+                return ToolResult(
+                    success=False, data={}, error=f"location_lat must be between -90 and 90: {value!r}"
+                )
+        elif field_name == "location_lng":
+            try:
+                lng = float(value)
+            except (ValueError, TypeError):
+                return ToolResult(
+                    success=False, data={}, error=f"location_lng must be a float: {value!r}"
+                )
+            if not (-180 <= lng <= 180):
+                return ToolResult(
+                    success=False, data={}, error=f"location_lng must be between -180 and 180: {value!r}"
+                )
+        elif field_name == "ward_number":
+            try:
+                wn = int(value)
+            except (ValueError, TypeError):
+                return ToolResult(
+                    success=False, data={}, error=f"ward_number must be an integer: {value!r}"
+                )
+            if not (1 <= wn <= 30):
+                return ToolResult(
+                    success=False, data={}, error=f"ward_number must be between 1 and 30: {value!r}"
+                )
+
+        # Map logical field name to actual DB column name
+        db_column = _FIELD_TO_COLUMN.get(field_name, field_name)
 
         with engine.begin() as conn:
             row = conn.execute(
@@ -109,7 +189,7 @@ class SaveCitizenField(Tool):
                 citizen_id = str(uuid.uuid4())
                 conn.execute(
                     sa.text(
-                        f"INSERT INTO citizens (id, {field_name}, registration_complete)"
+                        f"INSERT INTO citizens (id, {db_column}, registration_complete)"
                         " VALUES (:id, :value, false)"
                     ),
                     {"id": citizen_id, "value": value},
@@ -123,7 +203,7 @@ class SaveCitizenField(Tool):
             else:
                 citizen_id = str(citizen_id)
                 conn.execute(
-                    sa.text(f"UPDATE citizens SET {field_name} = :value WHERE id = :id"),
+                    sa.text(f"UPDATE citizens SET {db_column} = :value WHERE id = :id"),
                     {"value": value, "id": citizen_id},
                 )
 
