@@ -34,7 +34,9 @@ class AddToHistory(Tool):
         "properties": {
             "role": {
                 "type": "string",
-                "enum": ["agent", "citizen"],
+                # "assistant" is accepted as an alias for "agent" because OpenAI models
+                # default to the "assistant" chat role name. Stored value is always "agent".
+                "enum": ["agent", "assistant", "citizen"],
             },
             "text": {
                 "type": "string",
@@ -49,10 +51,14 @@ class AddToHistory(Tool):
         role = inputs.get("role")
         text = inputs.get("text")
 
-        if role not in ("agent", "citizen"):
+        if role not in ("agent", "assistant", "citizen"):
             return ToolResult(
-                success=False, data={}, error=f"role must be 'agent' or 'citizen', got {role!r}"
+                success=False, data={}, error=f"role must be 'agent', 'assistant', or 'citizen', got {role!r}"
             )
+
+        # Normalize "assistant" → "agent" so stored history is always canonical
+        if role == "assistant":
+            role = "agent"
         if not text or not isinstance(text, str):
             return ToolResult(success=False, data={}, error="text must be a non-empty string")
 
