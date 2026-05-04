@@ -3,8 +3,6 @@
 The four NotImplementedError stubs from PR 4a are replaced with real
 implementations in this file (PR 4e). Subclasses provide response_schema()
 and, optionally, override the grounding/validation hooks.
-
-StatelessAgent below is retained for V1.9 compatibility; it is deleted in PR 7.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from sqlalchemy.engine import Engine
 
@@ -25,18 +23,6 @@ from app.agents.runtime.structured_data_validator import (
     StructuredDataValidatorError,
 )
 from app.agents.runtime.grounding_checker import SubstringGroundingChecker
-
-
-# ---------------------------------------------------------------------------
-# V1.9 base class — retained for compatibility, deleted in PR 7
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class StatelessAgent:
-    name: str
-
-    def process(self, message: Any) -> Any:
-        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
