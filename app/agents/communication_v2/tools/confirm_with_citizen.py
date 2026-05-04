@@ -6,14 +6,14 @@ When all required complaint fields are collected, this tool generates a fixed-te
 read-back showing every collected field's value. The citizen must confirm before a ticket
 is created.
 
-NOTE: PR 5b ships English-only. The language parameter is accepted and validated but only
-English is rendered. Telugu and Hindi templates are added in PR 5d.
+Supports three languages: English, Telugu, and Hindi. Field labels remain in English
+(DB labels are not translated in PR 5d; label translation is a future PR).
 
 The read-back is NOT LLM-generated. This guarantees it is always complete and never
 invents or omits fields (per Doc C §7.3).
 
 If confirmation_reads exceeds 3, the tool returns an error indicating the agent should
-escalate to a human. PR 5c will add escalate_to_human to handle this case.
+escalate to a human.
 """
 
 from __future__ import annotations
@@ -27,6 +27,23 @@ from app.agents.communication_v2.tools.base import Tool, ToolResult
 
 MAX_CONFIRMATION_READS = 3
 
+# Read-back templates per language. {fields_block} is substituted at render time.
+# Field labels remain in English (PR 5d scope; full label translation is a future PR).
+_ENGLISH_INTRO = "I have noted your concern as follows:"
+_ENGLISH_OUTRO = 'Is this correct? If correct, please say "yes". If anything needs to change, please tell me what.'
+
+_TELUGU_INTRO = "మీ సమస్యను నేను ఈ విధంగా గమనించాను:"
+_TELUGU_OUTRO = 'ఇది సరిగ్గా ఉందా? సరిగ్గా ఉంటే "అవును" అని చెప్పండి. ఏదైనా మార్చాలంటే చెప్పండి.'
+
+_HINDI_INTRO = "मैंने आपकी समस्या को इस प्रकार समझा है:"
+_HINDI_OUTRO = 'क्या यह सही है? यदि सही है, तो कृपया "हाँ" कहें। यदि कुछ बदलना है, तो कृपया बताएं।'
+
+_TEMPLATES = {
+    "english": (_ENGLISH_INTRO, _ENGLISH_OUTRO),
+    "telugu": (_TELUGU_INTRO, _TELUGU_OUTRO),
+    "hindi": (_HINDI_INTRO, _HINDI_OUTRO),
+}
+
 
 class ConfirmWithCitizen(Tool):
     name = "confirm_with_citizen"
@@ -34,7 +51,7 @@ class ConfirmWithCitizen(Tool):
         "Render a deterministic confirmation read-back once all required complaint fields "
         "have been collected. Call this only after extract_structured_data reports "
         "all_required_collected=true. The returned readback_text must be sent to the citizen "
-        "as the reply_text."
+        "as the reply_text. Supports English, Telugu, and Hindi."
     )
     input_schema = {
         "type": "object",
@@ -42,7 +59,11 @@ class ConfirmWithCitizen(Tool):
             "language": {
                 "type": "string",
                 "enum": ["english", "telugu", "hindi"],
-                "description": "Language for the confirmation read-back. Only 'english' is rendered in PR 5b.",
+                "description": (
+                    "Language for the confirmation read-back. "
+                    "Pass 'telugu' for Telugu-script conversations, 'hindi' for Devanagari, "
+                    "'english' for Roman-script conversations."
+                ),
             },
         },
         "required": ["language"],
@@ -50,7 +71,11 @@ class ConfirmWithCitizen(Tool):
     }
 
     def execute(self, inputs: dict, engine: Engine, conversation_id: str) -> ToolResult:
-        language = inputs.get("language", "english")
+        # LLM-provided language is accepted as a hint, but the actual language used
+        # is taken from summary_data.language_preference when available. This prevents
+        # the model from mis-defaulting to "english" on non-English conversations
+        # (same pattern as add_to_history role normalization in PR 5b.1).
+        language_hint = inputs.get("language", "english")
 
         with engine.begin() as conn:
             row = conn.execute(
@@ -68,6 +93,12 @@ class ConfirmWithCitizen(Tool):
                 summary = json.loads(summary)
             elif not isinstance(summary, dict):
                 summary = {}
+
+            # Resolve language: prefer the conversation's stored preference over the LLM hint.
+            db_language = summary.get("language_preference", "")
+            language = db_language if db_language in _TEMPLATES else language_hint
+            if language not in _TEMPLATES:
+                language = "english"
 
             current_complaint = summary.get("current_complaint") or {}
             current_format = current_complaint.get("current_format") or {}
@@ -107,20 +138,20 @@ class ConfirmWithCitizen(Tool):
             subcategory_code = current_complaint.get("subcategory_code", "")
             label_map = self._load_labels(engine, subcategory_code)
 
-            # Build read-back text (English only in PR 5b)
-            lines: list[str] = ["I have noted your concern as follows:"]
+            # Select the template for the requested language (default English on invalid input)
+            intro, outro = _TEMPLATES.get(language, _TEMPLATES["english"])
+
+            # Build fields block (labels stay in English per PR 5d scope)
+            field_lines: list[str] = []
             for field in fields:
                 name = field.get("name", "")
                 value = field.get("value")
                 if value is None or value == "":
                     continue  # skip optional fields citizen didn't provide
                 label = label_map.get(name) or name.replace("_", " ").title()
-                lines.append(f"- {label}: {value}")
+                field_lines.append(f"- {label}: {value}")
 
-            lines.append(
-                'Is this correct? If correct, please say "yes". '
-                "If anything needs to change, please tell me what."
-            )
+            lines = [intro] + field_lines + [outro]
             readback_text = "\n".join(lines)
 
             # Update state
