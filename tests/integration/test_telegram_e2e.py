@@ -10,8 +10,9 @@ This test:
   1. Inserts a constituency_bots row with the test bot's encrypted token.
   2. Posts a synthesized Update payload to the webhook (with valid secret_token header).
   3. The webhook dispatches to CommunicationAgent and sends a real reply via Bot.send_message.
-  4. Waits up to 10s for the bot's reply to appear in bot.get_updates().
-  5. Asserts the reply arrived and DB rows were written.
+  4. Asserts the outbound message row has a numeric channel_msg_id (the Telegram message_id
+     returned by send_message). A non-null numeric message_id proves Telegram accepted the
+     send — python-telegram-bot only returns one after a successful API call.
 
 The LLM is real (OpenAI). The Telegram send is real. No mocks.
 """
@@ -71,18 +72,6 @@ def _make_update(update_id: int, chat_id: int, text: str) -> dict:
             "text": text,
         },
     }
-
-
-async def _wait_for_bot_reply(bot: Bot, after_ts: float, timeout: float = 10.0) -> str | None:
-    """Poll bot.get_updates() until a new outbound message appears or timeout."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        updates = await bot.get_updates(limit=10, timeout=0)
-        for u in updates:
-            if u.message and u.message.date.timestamp() >= after_ts:
-                return u.message.text
-        await asyncio.sleep(1)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +190,6 @@ class TestTelegramE2E:
         chat_id = setup["chat_id"]
         bot_username = setup["bot_username"]
         secret = setup["secret"]
-        token = setup["token"]
         cipher = setup["cipher"]
 
         update_id = int(time.time())  # use timestamp as unique update_id
@@ -209,8 +197,6 @@ class TestTelegramE2E:
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
-
-        before_ts = time.time()
 
         with patch("app.telegram.webhook._get_engine", return_value=engine), \
              patch("app.telegram.webhook._get_cipher", return_value=cipher):
@@ -253,13 +239,19 @@ class TestTelegramE2E:
             assert tu is not None
             assert tu[0] is not None, "telegram_updates.processed_at not set"
 
-        # Verify Telegram received the reply
-        async def _check():
-            async with Bot(token=token) as bot:
-                return await _wait_for_bot_reply(bot, before_ts, timeout=10.0)
-
-        reply_text = asyncio.get_event_loop().run_until_complete(_check())
-        assert reply_text is not None, (
-            "Bot reply did not arrive in Telegram within 10s. "
-            "Check TELEGRAM_TEST_CHAT_ID and that the bot has send permissions."
-        )
+            # Verify that the outbound message has a numeric Telegram message_id.
+            # send_message only returns a message_id after a successful Telegram API call,
+            # so a non-null numeric value here proves the message was delivered.
+            outbound = conn.execute(
+                sa.text(
+                    "SELECT channel_msg_id FROM messages "
+                    "WHERE conversation_id = :cid AND direction = 'outbound' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"cid": str(conv[0])},
+            ).fetchone()
+            assert outbound is not None, "outbound message row not found"
+            assert outbound[0] is not None, "outbound channel_msg_id is null"
+            assert outbound[0].isdigit(), (
+                f"channel_msg_id not numeric: {outbound[0]!r}"
+            )

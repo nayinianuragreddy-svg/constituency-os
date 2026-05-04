@@ -387,6 +387,8 @@ def test_explicit_language_preference_persisted(seeded_test_db_engine):
     """SaveCitizenField with field_name='preferred_language' persists 'telugu' to the citizens row.
 
     Non-live: no OpenAI call. Calls SaveCitizenField.execute() directly.
+    The grounding check (PR 8) requires an inbound message with Telugu script
+    or an explicit language preference statement before allowing the save.
     """
     ward_id, mandal_id = _get_real_ward_and_mandal(seeded_test_db_engine)
     citizen_id = _insert_registered_citizen(seeded_test_db_engine, ward_id, mandal_id)
@@ -395,6 +397,22 @@ def test_explicit_language_preference_persisted(seeded_test_db_engine):
         citizen_id,
         {"language_preference": "english", "history_compressed": []},
     )
+
+    # Insert an inbound message in Telugu script so the grounding check passes.
+    # This simulates the citizen saying "please reply in telugu" before the LLM
+    # calls save_citizen_field.
+    with seeded_test_db_engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO messages (id, conversation_id, direction, content, created_at) "
+                "VALUES (:id, :cid, 'inbound', :content, now())"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "cid": conv_id,
+                "content": "నాకు తెలుగులో జవాబు ఇవ్వండి",  # "please reply in Telugu"
+            },
+        )
 
     tool = SaveCitizenField()
     result = tool.execute(

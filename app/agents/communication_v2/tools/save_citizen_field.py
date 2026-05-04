@@ -25,6 +25,10 @@ Validation:
 - pincode: 6-digit Indian PIN (regex ^[1-9]\\d{5}$)
 - gender: one of {"male", "female", "other", "prefer_not_to_say"}
 - preferred_language: one of {"english", "telugu", "hindi"}
+  GROUNDING REQUIRED: preferred_language saves are rejected unless the citizen's
+  most recent inbound message contains an explicit language preference statement
+  or is written in the script of the requested language. This guards against the
+  LLM hallucinating a language preference from an unrelated confirmation message.
 - location_lat: float between -90 and 90 (stored in citizens.lat)
 - location_lng: float between -180 and 180 (stored in citizens.lng)
 - ward_number: integer between 1 and 30 (stored in citizens.ward_number)
@@ -55,6 +59,51 @@ _FIELD_TO_COLUMN = {
     "location_lat": "lat",
     "location_lng": "lng",
 }
+
+# Telugu Unicode block: U+0C00–U+0C7F
+_TELUGU_PATTERN = re.compile(r"[ఀ-౿]")
+# Devanagari Unicode block: U+0900–U+097F
+_DEVANAGARI_PATTERN = re.compile(r"[ऀ-ॿ]")
+
+# Explicit language-preference phrases (case-insensitive)
+_TELUGU_EXPLICIT = re.compile(
+    r"in telugu|telugu lo|telugu lo cheppu|నాకు తెలుగు|తెలుగులో",
+    re.IGNORECASE,
+)
+_HINDI_EXPLICIT = re.compile(
+    r"in hindi|hindi me\b|hindi mein|मुझे हिंदी|हिंदी में",
+    re.IGNORECASE,
+)
+_ENGLISH_EXPLICIT = re.compile(
+    r"in english|english me\b|english lo",
+    re.IGNORECASE,
+)
+
+
+def _is_grounded_for_language(value: str, message: str) -> bool:
+    """Return True if the message grounds the preferred_language save.
+
+    Two tiers:
+    a) Script match — the message is written in the script of the requested language.
+    b) Explicit statement — the message contains an explicit language preference phrase.
+    """
+    if value == "telugu":
+        if _TELUGU_PATTERN.search(message):
+            return True
+        if _TELUGU_EXPLICIT.search(message):
+            return True
+    elif value == "hindi":
+        if _DEVANAGARI_PATTERN.search(message):
+            return True
+        if _HINDI_EXPLICIT.search(message):
+            return True
+    elif value == "english":
+        # English is grounded when the message has no Telugu or Devanagari chars
+        if not _TELUGU_PATTERN.search(message) and not _DEVANAGARI_PATTERN.search(message):
+            return True
+        if _ENGLISH_EXPLICIT.search(message):
+            return True
+    return False
 
 
 class SaveCitizenField(Tool):
@@ -135,6 +184,29 @@ class SaveCitizenField(Tool):
                     success=False,
                     data={},
                     error=f"preferred_language must be one of {sorted(LANGUAGE_VALUES)}: {value!r}",
+                )
+            # Grounding check: read the most recent inbound message for this conversation
+            try:
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        sa.text(
+                            "SELECT content FROM messages "
+                            "WHERE conversation_id = :cid AND direction = 'inbound' "
+                            "ORDER BY created_at DESC LIMIT 1"
+                        ),
+                        {"cid": conversation_id},
+                    ).fetchone()
+            except Exception as exc:
+                return ToolResult(
+                    success=False, data={},
+                    error=f"grounding check failed: {exc!r}",
+                )
+            last_message = row[0] if row else ""
+            if not _is_grounded_for_language(value, last_message or ""):
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error="preferred_language not grounded in citizen's most recent message",
                 )
         elif field_name == "location_lat":
             try:
