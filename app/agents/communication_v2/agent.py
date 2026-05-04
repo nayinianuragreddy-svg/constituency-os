@@ -17,6 +17,7 @@ import logging
 import os
 from typing import Optional
 
+import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 
 from app.agents.base import BaseAgent, AgentContext, AgentResult
@@ -229,6 +230,30 @@ class CommunicationAgent(BaseAgent):
             "additionalProperties": False,
         }
 
+    def _compute_today_cost_usd(self) -> float:
+        """Sum of agent_actions.cost_usd for today (IST), this agent."""
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                sa.text(
+                    """
+                    SELECT COALESCE(SUM(cost_usd), 0.0) FROM agent_actions
+                    WHERE agent_name = 'communication_v2'
+                      AND created_at >= (CURRENT_DATE AT TIME ZONE 'Asia/Kolkata')
+                    """
+                )
+            ).scalar()
+            return float(result or 0.0)
+
+    def _cost_ceiling_message(self, context: AgentContext) -> str:
+        """Returns the cost ceiling denial message in the citizen's script language."""
+        script = context.incoming_message_script or "roman"
+        if script == "telugu":
+            return "సర్వీస్ తాత్కాలికంగా అందుబాటులో లేదు. దయచేసి రేపు మళ్లీ ప్రయత్నించండి."
+        elif script == "devanagari":
+            return "सेवा अस्थायी रूप से उपलब्ध नहीं है। कृपया कल पुनः प्रयास करें।"
+        else:
+            return "Service temporarily unavailable. Please try again tomorrow."
+
     def dispatch(self, context: AgentContext) -> AgentResult:
         """Multi-hop dispatch loop (up to max_hops per Doc C §3).
 
@@ -239,7 +264,35 @@ class CommunicationAgent(BaseAgent):
         4. Executes all tool_calls from the response.
         5. Stops if no state-changing tool succeeded (reply is ready),
            otherwise hops again so the LLM can react.
+
+        Cost ceiling check runs FIRST. When today's spend for this agent exceeds
+        the per-day ceiling (default $6.00, overridable via constituency_config),
+        dispatch refuses to call the LLM and returns a localised denial message.
+        NOTE: the ceiling is currently per-agent, not per-constituency. When a
+        second constituency onboards, add constituency_id filtering here.
         """
+        # Cost ceiling check — hard stop before any LLM call
+        ceiling = self._constituency_config.get("cost_ceiling_usd_per_day", 6.00)
+        try:
+            today_cost = self._compute_today_cost_usd()
+        except Exception as exc:
+            logger.warning("cost_ceiling_check_failed: %s (proceeding without ceiling)", exc)
+            today_cost = 0.0
+
+        if today_cost >= ceiling:
+            logger.warning(
+                "cost_ceiling_exceeded conversation_id=%s today_cost=%.4f ceiling=%.2f",
+                context.conversation_id, today_cost, ceiling,
+            )
+            return AgentResult(
+                reply_text=self._cost_ceiling_message(context),
+                error="cost_ceiling_exceeded",
+                tool_calls_made=[],
+                hops_used=0,
+                cost_usd=0.0,
+                escalated=False,
+            )
+
         total_cost = 0.0
         total_input_tokens = 0
         total_output_tokens = 0

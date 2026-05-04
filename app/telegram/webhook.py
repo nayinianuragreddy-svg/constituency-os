@@ -35,7 +35,7 @@ from app.telegram.encryption import TelegramTokenCipher
 from app.telegram.rate_limiter import TelegramRateLimiter
 from app.telegram.sender import TelegramSender
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("app.telegram.webhook")
 
 router = APIRouter()
 
@@ -140,7 +140,7 @@ async def telegram_webhook(
                 {"uid": update_id, "bid": bot_config.bot_id, "now": datetime.now(timezone.utc)},
             )
     except IntegrityError:
-        logger.info("Duplicate update_id=%d for bot %s, acking", update_id, bot_username)
+        logger.warning("dedup_hit", extra={"update_id": update_id, "bot_id": str(bot_config.bot_id)})
         return {"ok": True}
 
     conversation_id = None
@@ -150,6 +150,7 @@ async def telegram_webhook(
         )
 
         # Step 7: record inbound message
+        script = _detect_script(message_text)
         with engine.begin() as conn:
             conn.execute(
                 sa.text(
@@ -174,8 +175,16 @@ async def telegram_webhook(
                 {"now": datetime.now(timezone.utc), "cid": str(conversation_id)},
             )
 
+        logger.info("inbound_message_received", extra={
+            "conversation_id": str(conversation_id),
+            "bot_id": str(bot_config.bot_id),
+            "citizen_id": str(citizen_id) if citizen_id else None,
+            "update_id": update_id,
+            "chat_id": chat_id,
+            "message_script": script,
+        })
+
         # Step 8+9: build context and dispatch
-        script = _detect_script(message_text)
         ctx = AgentContext(
             conversation_id=str(conversation_id),
             incoming_message=message_text,
@@ -194,11 +203,25 @@ async def telegram_webhook(
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, agent.dispatch, ctx)
 
+        logger.info("dispatch_complete", extra={
+            "conversation_id": str(conversation_id),
+            "hops_used": result.hops_used,
+            "cost_usd": result.cost_usd,
+            "tool_calls_count": len(result.tool_calls_made),
+            "error": result.error,
+        })
+
         # Step 11: send reply
         reply_msg_id = None
         if result.reply_text:
             sender = _get_sender()
             reply_msg_id = await sender.send_message(bot_config, chat_id, result.reply_text)
+
+            logger.info("outbound_sent", extra={
+                "conversation_id": str(conversation_id),
+                "telegram_message_id": reply_msg_id,
+                "reply_length": len(result.reply_text or ""),
+            })
 
             # Record outbound message
             with engine.begin() as conn:
@@ -234,10 +257,10 @@ async def telegram_webhook(
             )
 
     except Exception as exc:
-        logger.error(
-            "Error processing update_id=%d bot=%s: %s",
-            update_id, bot_username, exc, exc_info=True,
-        )
+        logger.error("dispatch_failed", extra={
+            "conversation_id": str(conversation_id) if conversation_id else None,
+            "error": str(exc),
+        }, exc_info=True)
         # Mark error in telegram_updates so staff can inspect
         try:
             with engine.begin() as conn:
