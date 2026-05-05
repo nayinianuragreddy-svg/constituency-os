@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.admin_view import router as admin_router
-from app.db import engine, init_db
+from app.db import engine
 from app.telegram.webhook import router as telegram_router
 
 app = FastAPI(title="Constituency OS V2", version="2.0.0")
@@ -14,9 +14,6 @@ app.include_router(admin_router)
 app.include_router(telegram_router)
 
 
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
 
 
 @app.get("/health")
